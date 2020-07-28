@@ -60,10 +60,7 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted {
-                at: self,
-                remaining: count - offset,
-            })
+            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
         }
     }
 
@@ -77,16 +74,13 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted {
-                at: self,
-                remaining: count - offset,
-            })
+            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
         }
     }
 
     /// Moves a `Point` downwards by up to the specified amount.
     pub fn down(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, ErrorKind> {
-        let offset = count.min(buffer.rows().saturating_sub(1));
+        let offset = count.min(buffer.rows().saturating_sub(1) - self.y);
 
         self.y += offset;
         self.x = self.w.min(buffer.cols(self.y));
@@ -94,10 +88,7 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted {
-                at: self,
-                remaining: count - offset,
-            })
+            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
         }
     }
 
@@ -111,10 +102,7 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted {
-                at: self,
-                remaining: count - offset,
-            })
+            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
         }
     }
 
@@ -153,11 +141,9 @@ impl Cursor {
             Ok(self)
         } else {
             self.right(count, buffer).or_else(|err| match err {
-                ErrorKind::Interrupted { at, remaining } => at
-                    .down(1, buffer)
-                    .or(Err(err))?
-                    .bol(buffer)
-                    .forward(remaining - 1, buffer),
+                ErrorKind::Interrupted { at, remaining } => {
+                    at.down(1, buffer).or(Err(err))?.bol(buffer).forward(remaining - 1, buffer)
+                }
             })
         }
     }
@@ -171,11 +157,9 @@ impl Cursor {
             Ok(self)
         } else {
             self.left(count, buffer).or_else(|err| match err {
-                ErrorKind::Interrupted { at, remaining } => at
-                    .up(1, buffer)
-                    .or(Err(err))?
-                    .eol(buffer)
-                    .backward(remaining - 1, buffer),
+                ErrorKind::Interrupted { at, remaining } => {
+                    at.up(1, buffer).or(Err(err))?.eol(buffer).backward(remaining - 1, buffer)
+                }
             })
         }
     }

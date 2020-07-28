@@ -53,10 +53,7 @@ impl Buffer for String {
     }
 
     fn cols(&self, line: usize) -> usize {
-        self.lines()
-            .nth(line)
-            .expect("Attempt to index past end of `Buffer`")
-            .len()
+        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").len()
     }
 
     fn get(&self, point: Cursor) -> Option<char> {
@@ -75,16 +72,16 @@ impl Buffer for String {
     }
 }
 
-fn to_offset(buffer: &String, point: Cursor) -> usize {
-    let offset = point.col(buffer);
+fn to_offset(buffer: &str, point: Cursor) -> usize {
+    let offset = point.col(&buffer.to_owned());
 
     buffer
         .split('\n')
-        .take(point.row(buffer))
+        .take(point.row(&buffer.to_owned()))
         .fold(offset, |offset, line| offset + 1 + line.chars().count())
 }
 
-fn to_offset_bound(buffer: &String, bound: Bound<&Cursor>) -> Bound<usize> {
+fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
     use Bound::*;
 
     match bound {

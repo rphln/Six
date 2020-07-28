@@ -6,4 +6,5 @@ edition = "2018"
 license = "LGPL-3.0-or-later"
 
 [dependencies]
+tui = "0.10"
 termion = "1.5"
