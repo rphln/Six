@@ -3,6 +3,9 @@ use std::io;
 
 use tui::backend::{Backend, TermionBackend};
 use tui::text::Text;
+
+use tui::style::{Color, Style};
+use tui::text::{Span, Spans};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::Terminal;
 
@@ -11,16 +14,19 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 
+use six::buffer::Buffer;
+use six::cursor::Cursor;
 use six::state::event_loop;
-use six::state::State;
+use six::state::{Mode, State};
 
 use six::event::{Event, Events};
 
-fn draw<W>(state: &State, terminal: &mut Terminal<W>) -> Result<(), Box<dyn Error>>
+fn draw<W, B>(state: &State<B>, terminal: &mut Terminal<W>) -> Result<(), Box<dyn Error>>
 where
     W: Backend + io::Write,
+    B: Buffer + std::fmt::Debug,
 {
-    if matches!(state.mode, six::state::Mode::Edit) {
+    if matches!(state.mode(), six::state::Mode::Edit) {
         write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?;
     } else {
         write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?;
@@ -31,7 +37,7 @@ where
 
         let chunks = Layout::default()
             .margin(1)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .constraints([Constraint::Min(1), Constraint::Length(2)].as_ref())
             .split(frame.size());
 
         let body = chunks[0];
@@ -48,10 +54,62 @@ where
         let cx = body.x + x.min(width);
         let cy = body.y + y.min(height);
 
-        let text = Text::from(state.buffer.as_str());
-        let paragraph = Paragraph::new(text).scroll((sy, sx));
+        let spans: Vec<_> = state
+            .lines()
+            .enumerate()
+            .map(|(row, line)| {
+                if let Mode::Select { anchor, .. } = state.mode() {
+                    let (begin, end) = match (state.cursor(), anchor) {
+                        (&p, &q) if p < q => (p, q),
+                        (&p, &q) if p > q => (q, p),
+
+                        (_, _) => return Spans::from(line),
+                    };
+
+                    let mut prefix = 0;
+                    let mut infix = 0;
+                    let mut suffix = 0;
+
+                    for (col, _) in line.chars().enumerate() {
+                        let point = Cursor::new(col, row);
+
+                        if point <= begin {
+                            prefix += 1;
+                        } else if point > end {
+                            suffix += 1;
+                        } else {
+                            infix += 1;
+                        }
+                    }
+
+                    infix += prefix;
+                    suffix += infix;
+
+                    let suffix = line[infix..suffix].to_string();
+                    let infix = line[prefix..infix].to_string();
+                    let prefix = line[..prefix].to_string();
+
+                    return Spans::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(infix, Style::default().bg(Color::Red)),
+                        Span::raw(suffix),
+                    ]);
+                }
+
+                Spans::from(line)
+            })
+            .collect();
+
+        let paragraph = Paragraph::new(spans).scroll((sy, sx));
+
+        let debug = format!("{:?}", state);
+        let debug = debug.as_str();
+        let debug = Paragraph::new(debug)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::Black));
 
         frame.render_widget(paragraph, body);
+        frame.render_widget(debug, chunks[1]);
         frame.set_cursor(cx, cy)
     })?;
 
@@ -67,14 +125,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = State::default();
+    let mut state = State::with_buffer(String::new());
     let events = Events::new();
 
     loop {
         draw(&state, &mut terminal)?;
 
         if let Event::Input(input) = events.next()? {
-            state = event_loop(state, input).ok_or("")?;
+            event_loop(&mut state, input).ok_or("")?;
         }
     }
 }

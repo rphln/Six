@@ -1,31 +1,49 @@
 use std::collections::Bound::{self, *};
 
-use std::collections::HashMap;
 use std::ops::RangeBounds;
 use std::rc::Rc;
 
 use termion::event::Key;
 
-use crate::buffer::Buffer;
-use crate::cursor::{unwrap, Cursor};
+use crate::buffer::{Buffer, Lines};
+use crate::cursor::Cursor;
 
-#[derive(Clone)]
-pub struct State {
+type Range = (Cursor, Cursor);
+
+#[derive(Debug, Clone)]
+pub struct State<Buf: Buffer> {
     /// Current content.
-    pub buffer: Rc<String>,
+    buffer: Buf,
 
     /// Cursor position in the content.
     cursor: Cursor,
 
     /// Current mode.
-    pub mode: Mode,
-
-    /// Editor registers.
-    registers: HashMap<Register, RegisterType>,
+    mode: Mode<Buf>,
 }
 
 #[derive(Clone)]
-pub enum Mode {
+pub struct Callback<Buf: Buffer, P>(Rc<dyn Fn(State<Buf>, P) -> State<Buf>>);
+
+use std::fmt;
+
+impl<B: Buffer, P> fmt::Debug for Callback<B, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Callback").finish()
+    }
+}
+
+impl<Buf: Buffer, P> Callback<Buf, P> {
+    pub fn new<C>(callback: C) -> Callback<Buf, P>
+    where
+        C: Fn(State<Buf>, P) -> State<Buf> + 'static,
+    {
+        Self(Rc::new(callback))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Mode<Buf: Buffer> {
     /// The default editor mode.
     Normal { count: Option<usize> },
 
@@ -33,7 +51,7 @@ pub enum Mode {
     Edit,
 
     /// Queries the user for a text range.
-    Select { anchor: Cursor },
+    Select { anchor: Cursor, count: Option<usize> },
 
     /// Queries the user for a text object and applies an operation.
     Operator {
@@ -41,94 +59,96 @@ pub enum Mode {
         count: Option<usize>,
 
         /// Callback invoked once a text object has been provided.
-        // Why can't I just do `Box<dyn RangeBound<Cursor>>` or something like it.
-        and_then: Rc<dyn Fn(State, (Bound<Cursor>, Bound<Cursor>)) -> State>,
+        and_then: Callback<Buf, Range>,
     },
 
     /// Queries the user for a text input and applies an operation.
     Query {
         prompt: Option<String>,
+
+        /// Length of the query before the callback is invoked. If `None`,
+        /// invokes on `Return`.
         length: Option<usize>,
 
+        /// Partial buffer for the query.
+        partial: String,
+
         /// Callback invoked once the input has finished.
-        and_then: Rc<dyn Fn(State, String) -> State>,
+        and_then: Callback<Buf, String>,
     },
 }
 
-#[derive(Clone, Hash, PartialEq, Eq)]
-pub enum Register {
-    /// Special register used to store how many times an action should be repeated.
-    Repeat,
+impl<Buf: Buffer> Mode<Buf> {
+    pub fn set_count(&mut self, next: Option<usize>) {
+        match self {
+            Mode::Operator { ref mut count, .. }
+            | Mode::Normal { ref mut count, .. }
+            | Mode::Select { ref mut count, .. } => *count = next,
 
-    /// Special register used to store the result of a query made to the user.
-    Query,
-
-    /// Special register used internally to store the initial position of a text object.
-    EditStart,
-
-    /// Special register used internally to store the final position of a text object.
-    EditEnd,
-
-    /// An user-defined register.
-    Other(&'static str),
-}
-
-#[derive(Clone)]
-pub enum RegisterType {
-    Text(String),
-    Number(usize),
-    Mark(Cursor),
+            _ => panic!("Tried to set count for an incompatible mode"),
+        }
+    }
 }
 
 macro_rules! cursor_delegate_unwrap {
-    ( $name:ident  ) => {
-        pub fn $name(mut self, count: usize) -> Self {
-            self.cursor = unwrap(self.cursor.$name(count, self.buffer.as_ref()));
-            self
+    ( $name:ident ) => {
+        pub fn $name(&mut self, count: usize) {
+            self.cursor = self.cursor.$name(count, &self.buffer).unwrap_or_else(|err| err.at);
         }
     };
 }
 
-impl State {
+impl<Buf: Buffer> State<Buf> {
+    pub fn with_buffer(buffer: Buf) -> Self {
+        State { buffer, cursor: Cursor::new(0, 0), mode: Mode::Normal { count: None } }
+    }
+
     pub fn col(&self) -> usize {
-        self.cursor.col(self.buffer.as_ref())
+        self.cursor.col(&self.buffer)
     }
 
     pub fn row(&self) -> usize {
-        self.cursor.row(self.buffer.as_ref())
+        self.cursor.row(&self.buffer)
     }
 
-    pub fn insert(mut self, at: Cursor, ch: char) -> Self {
-        Buffer::insert(Rc::make_mut(&mut self.buffer), at, ch);
-        self
+    pub fn mode(&self) -> &Mode<Buf> {
+        &self.mode
     }
 
-    pub fn delete<B>(mut self, range: B) -> Self
+    pub fn cursor(&self) -> &Cursor {
+        &self.cursor
+    }
+
+    pub fn lines(&self) -> Lines {
+        self.buffer.lines()
+    }
+
+    pub fn insert(&mut self, at: Cursor, ch: char) {
+        Buffer::insert(&mut self.buffer, at, ch);
+    }
+
+    pub fn delete<R>(&mut self, range: R)
     where
-        B: RangeBounds<Cursor>,
+        R: RangeBounds<Cursor>,
     {
-        Buffer::delete(Rc::make_mut(&mut self.buffer), range);
-        self
+        Buffer::delete(&mut self.buffer, range);
     }
 
-    pub fn insert_at_cursor(self, ch: char) -> Self {
+    pub fn insert_at_cursor(&mut self, ch: char) {
         let cursor = self.cursor;
-        self.insert(cursor, ch)
+        self.insert(cursor, ch);
     }
 
-    pub fn mode(mut self, mode: Mode) -> Self {
+    pub fn set_mode(&mut self, mode: Mode<Buf>) {
         self.mode = mode;
-        self
     }
 
-    pub fn bol(mut self) -> Self {
-        self.cursor = self.cursor.bol(self.buffer.as_ref());
-        self
+    pub fn bol(&mut self) {
+        self.cursor = self.cursor.bol(&self.buffer);
     }
 
-    pub fn eol(mut self) -> Self {
-        self.cursor = self.cursor.eol(self.buffer.as_ref());
-        self
+    pub fn eol(&mut self) {
+        self.cursor = self.cursor.eol(&self.buffer);
     }
 
     cursor_delegate_unwrap!(down);
@@ -139,40 +159,9 @@ impl State {
     cursor_delegate_unwrap!(backward);
     cursor_delegate_unwrap!(forward_words);
     cursor_delegate_unwrap!(backward_words);
-
-    pub fn consume_count(&mut self, name: Register) -> Option<usize> {
-        self.registers.remove(&name).and_then(|register| {
-            if let RegisterType::Number(n) = register {
-                Some(n)
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn consume_mark(&mut self, name: Register) -> Option<Cursor> {
-        self.registers.remove(&name).and_then(|register| {
-            if let RegisterType::Mark(n) = register {
-                Some(n)
-            } else {
-                None
-            }
-        })
-    }
 }
 
-impl Default for State {
-    fn default() -> Self {
-        State {
-            buffer: Rc::new(String::default()),
-            cursor: Cursor::new(0, 0),
-            registers: HashMap::new(),
-            mode: Mode::Normal { count: None },
-        }
-    }
-}
-
-pub fn event_loop(state: State, event: Key) -> Option<State> {
+pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: Key) -> Option<&mut State<Buf>> {
     use Key::{Backspace, Char, Ctrl, Delete, Esc};
     use Mode::{Edit, Normal, Operator, Query, Select};
 
@@ -180,91 +169,239 @@ pub fn event_loop(state: State, event: Key) -> Option<State> {
         return None;
     }
 
-    Some(match (&state.mode, event) {
-        (Edit, Esc) => state.mode(Normal { count: None }).left(1),
-
-        (Normal { mut count }, Char(ch)) | (Operator { mut count, .. }, Char(ch))
-            if ch.is_digit(10) =>
-        {
-            let k = ch.to_digit(10).expect("digit") as usize;
-            count = count.map(|n| n * 10 + k).or(Some(k));
-
-            state
+    match (&state.mode, event) {
+        (Edit, Esc) => {
+            state.set_mode(Normal { count: None });
+            state.left(1);
         }
 
-        (_, Esc) | (_, Ctrl('c')) => state.mode(Normal { count: None }),
+        (Normal { count }, Char(ch @ '0'..='9'))
+        | (Operator { count, .. }, Char(ch @ '0'..='9')) => {
+            let delta = ch.to_digit(10).unwrap() as usize;
+            let n = count.or(Some(0)).map(|count| count * 10 + delta);
 
-        (Normal { .. }, Char('h')) | (Select { .. }, Char('h')) | (_, Key::Left) => state.left(1),
-        (Normal { .. }, Char('j')) | (Select { .. }, Char('j')) | (_, Key::Down) => state.down(1),
-        (Normal { .. }, Char('k')) | (Select { .. }, Char('k')) | (_, Key::Up) => state.up(1),
-        (Normal { .. }, Char('l')) | (Select { .. }, Char('l')) | (_, Key::Right) => state.right(1),
+            state.mode.set_count(n);
+        }
 
-        (Normal { .. }, Char('i')) => state.mode(Edit),
-        (Normal { .. }, Char('a')) => state.mode(Edit).right(1),
+        (_, Esc) => {
+            state.set_mode(Normal { count: None });
+        }
 
-        (Normal { .. }, Char('I')) => state.bol().mode(Edit),
-        (Normal { .. }, Char('A')) => state.eol().mode(Edit),
+        (Normal { count, .. }, Char('h'))
+        | (Select { count, .. }, Char('h'))
+        | (Normal { count, .. }, Key::Left)
+        | (Select { count, .. }, Key::Left) => {
+            let count = count.unwrap_or(1);
+            state.mode.set_count(None);
+            state.left(count);
+        }
+        (Normal { count, .. }, Char('j'))
+        | (Select { count, .. }, Char('j'))
+        | (Normal { count, .. }, Key::Down)
+        | (Select { count, .. }, Key::Down) => {
+            let count = count.unwrap_or(1);
+            state.mode.set_count(None);
+            state.down(count);
+        }
+        (Normal { count, .. }, Char('k'))
+        | (Select { count, .. }, Char('k'))
+        | (Normal { count, .. }, Key::Up)
+        | (Select { count, .. }, Key::Up) => {
+            let count = count.unwrap_or(1);
+            state.mode.set_count(None);
+            state.up(count);
+        }
+        (Normal { count, .. }, Char('l'))
+        | (Select { count, .. }, Char('l'))
+        | (Normal { count, .. }, Key::Right)
+        | (Select { count, .. }, Key::Right) => {
+            let count = count.unwrap_or(1);
+            state.mode.set_count(None);
+            state.right(count);
+        }
 
-        (Normal { .. }, Char('o')) => state.eol().insert_at_cursor('\n').forward(1).mode(Edit),
-        (Normal { .. }, Char('O')) => state.bol().insert_at_cursor('\n').mode(Edit),
+        (_, Key::Left) => state.left(1),
+        (_, Key::Down) => state.down(1),
+        (_, Key::Up) => state.up(1),
+        (_, Key::Right) => state.right(1),
 
-        // (Normal { .. }, Char('W')) => {
-        //     let count = state.consume_count(Register::Repeat).unwrap_or(1);
+        (Normal { .. }, Char('v')) => state.set_mode(Select { anchor: state.cursor, count: None }),
 
-        //     state.cursor = cursor::unwrap(state.cursor.forward_words(count, &state.buffer));
+        (Normal { .. }, Char('i')) => state.set_mode(Edit),
+        (Normal { .. }, Char('a')) => {
+            state.set_mode(Edit);
+            state.right(1);
+        }
 
-        //     state
-        // }
-        (Normal { .. }, Char('d')) => state.mode(Operator {
-            prompt: Some("Delete".to_string()),
-            count: None,
-            and_then: Rc::new(State::delete),
-        }),
+        (Normal { .. }, Char('I')) => {
+            state.bol();
+            state.set_mode(Edit);
+        }
+        (Normal { .. }, Char('A')) => {
+            state.eol();
+            state.set_mode(Edit);
+        }
+
+        (Normal { .. }, Char('o')) => {
+            state.eol();
+            state.insert_at_cursor('\n');
+            state.forward(1);
+            state.set_mode(Edit);
+        }
+        (Normal { .. }, Char('O')) => {
+            state.bol();
+            state.insert_at_cursor('\n');
+            state.set_mode(Edit);
+        }
+
+        (Normal { count, .. }, Char('W')) => {
+            let count = count.unwrap_or(1);
+            state.forward_words(count);
+        }
+
+        (Normal { count, .. }, Char('B')) => {
+            let count = count.unwrap_or(1);
+            state.backward_words(count);
+        }
+
+        (Mode::Normal { .. }, Char('s')) => {
+            state.set_mode(Mode::Operator {
+                prompt: Some("Surround".into()),
+                count: None,
+
+                and_then: Callback::new(
+                    |mut state: State<Buf>, (before, after): (Cursor, Cursor)| {
+                        let after = after
+                            .backward_while(&state.buffer, |p| {
+                                state
+                                    .buffer
+                                    .get(p.left(1, &state.buffer).unwrap())
+                                    .map(|ch| ch.is_whitespace())
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or_else(|e| e.at);
+
+                        let before = before
+                            .forward_while(&state.buffer, |p| {
+                                state.buffer.get(p).map(|ch| ch.is_whitespace()).unwrap_or(false)
+                            })
+                            .unwrap_or_else(|e| e.at);
+
+                        state.set_mode(Mode::Query {
+                            prompt: Some("Surround with".into()),
+                            length: Some(1),
+                            partial: String::with_capacity(1),
+                            and_then: Callback::new(move |mut state, result: String| {
+                                let (prefix, suffix) = match result.chars().nth(0).unwrap() {
+                                    '(' | ')' => ('(', ')'),
+                                    '[' | ']' => ('[', ']'),
+                                    '{' | '}' => ('{', '}'),
+
+                                    '|' => ('|', '|'),
+                                    '"' => ('"', '"'),
+                                    '\'' => ('\'', '\''),
+
+                                    ch => (ch, ch),
+                                };
+
+                                state.insert(after, suffix);
+                                state.insert(before, prefix);
+
+                                state.set_mode(Normal { count: None });
+
+                                state
+                            }),
+                        });
+                        state
+                    },
+                ),
+            });
+        }
 
         (Operator { and_then, count, .. }, Char('W')) => {
-            let end = unwrap(state.cursor.forward_words(count.unwrap_or(1), state.buffer.as_ref()));
+            let end = state
+                .cursor
+                .forward_words(count.unwrap_or(1), &state.buffer)
+                .unwrap_or_else(|e| e.at);
 
-            and_then(state.clone(), (Included(state.cursor), Excluded(end)))
+            *state = and_then.0(state.clone(), (state.cursor, end));
         }
 
-        // (Normal { .. }, Char('B')) => {
-        //     let count = state.consume_count(COUNT_REGISTER).unwrap_or(1);
-        //     state.cursor = cursor::unwrap(state.cursor.backward_words(count, &state.buffer));
+        (Operator { and_then, count, .. }, Char('B')) => {
+            let start = state
+                .cursor
+                .backward_words(count.unwrap_or(1), &state.buffer)
+                .unwrap_or_else(|e| e.at);
 
-        //     state
-        // }
-        (Edit, Char(ch)) => state.insert_at_cursor(ch).forward(1),
+            *state = and_then.0(state.clone(), (start, state.cursor));
+        }
 
-        (Edit, Key::Backspace) => {
-            let mut state = state.backward(1);
+        (Normal { .. }, Char('d')) => state.set_mode(Operator {
+            prompt: Some("Delete".to_string()),
+            count: None,
+            and_then: Callback::new(|state, (start, end)| {
+                let mut state = state.clone();
+
+                state.delete((Included(start), Excluded(end)));
+                state.cursor = start;
+
+                state
+            }),
+        }),
+
+        (Edit, Char(ch)) => {
+            state.insert_at_cursor(ch);
+            state.forward(1);
+        }
+
+        (Edit, Backspace) => {
+            state.backward(1);
 
             if state.buffer.get(state.cursor).is_some() {
-                Buffer::delete(Rc::make_mut(&mut state.buffer), state.cursor..=state.cursor)
-            }
-
-            state
+                state.delete(state.cursor..=state.cursor);
+            };
         }
 
-        // (Edit, Key::Delete) => {
-        //     if state.buffer.get(state.cursor).is_some() {
-        //         state.buffer.delete(state.cursor..=state.cursor);
-        //     }
+        (Edit, Delete) => {
+            if state.buffer.get(state.cursor).is_some() {
+                state.delete(state.cursor..=state.cursor);
+            };
+        }
 
-        //     state
-        // }
+        (Edit, Ctrl('w')) => {
+            let anchor = state.cursor;
+            state.backward_words(1);
 
-        // (Edit, Ctrl('w')) => {
-        //     let anchor = state.cursor;
-        //     state.cursor = state
-        //         .cursor
-        //         .backward_words(1, &state.buffer)
-        //         .unwrap_or_else(|err| match err {
-        //             cursor::ErrorKind::Interrupted { at, .. } => at,
-        //         });
+            state.delete(state.cursor..anchor);
+        }
 
-        //     state.buffer.delete(state.cursor..anchor);
-        //     state
-        // }
-        _ => state,
-    })
+        (Query { and_then, .. }, Char(ch)) => {
+            match (&mut state.mode, ch) {
+                (Query { length: None, .. }, '\n') => (),
+                (Query { length, ref mut partial, .. }, _) => {
+                    partial.push(ch);
+                }
+
+                _ => unreachable!(),
+            };
+
+            let (dispatch, partial, and_then) = match (&state.mode, ch) {
+                (Query { partial, and_then, length: None, .. }, '\n') => (true, partial, and_then),
+                (Query { partial, and_then, length: Some(n), .. }, _) if partial.len() == *n => {
+                    (true, partial, and_then)
+                }
+                (Query { partial, and_then, .. }, _) => (false, partial, and_then),
+
+                _ => unreachable!(),
+            };
+
+            if dispatch {
+                *state = and_then.0(state.clone(), partial.clone());
+            }
+        }
+
+        _ => (),
+    };
+
+    Some(state)
 }

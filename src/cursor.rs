@@ -8,15 +8,14 @@ pub struct Cursor {
     w: usize,
 }
 
-pub enum ErrorKind {
-    /// The operation was interrupted too soon.
-    Interrupted {
-        /// Position at which the interruption occurred.
-        at: Cursor,
+/// The operation was interrupted too soon.
+#[derive(Debug)]
+pub struct Interrupted {
+    /// Position at which the interruption occurred.
+    pub at: Cursor,
 
-        /// Remaining units to move.
-        remaining: usize,
-    },
+    /// Remaining units to move.
+    pub remaining: usize,
 }
 
 impl Cursor {
@@ -51,7 +50,7 @@ impl Cursor {
     }
 
     /// Moves a `Point` forwards inside a line by up to the specified amount.
-    pub fn right(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, ErrorKind> {
+    pub fn right(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
         let offset = count.min(buffer.cols(self.y) - self.x);
 
         self.x += offset;
@@ -60,12 +59,12 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
+            Err(Interrupted { at: self, remaining: count - offset })
         }
     }
 
     /// Moves a `Point` backwards inside a line by up to the specified amount.
-    pub fn left(mut self, count: usize, _: &impl Buffer) -> Result<Self, ErrorKind> {
+    pub fn left(mut self, count: usize, _: &impl Buffer) -> Result<Self, Interrupted> {
         let offset = count.min(self.x);
 
         self.x -= offset;
@@ -74,12 +73,12 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
+            Err(Interrupted { at: self, remaining: count - offset })
         }
     }
 
     /// Moves a `Point` downwards by up to the specified amount.
-    pub fn down(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, ErrorKind> {
+    pub fn down(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
         let offset = count.min(buffer.rows().saturating_sub(1) - self.y);
 
         self.y += offset;
@@ -88,12 +87,12 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
+            Err(Interrupted { at: self, remaining: count - offset })
         }
     }
 
     /// Moves a `Point` upwards by up to the specified amount.
-    pub fn up(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, ErrorKind> {
+    pub fn up(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
         let offset = count.min(self.y);
 
         self.y -= offset;
@@ -102,12 +101,12 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(ErrorKind::Interrupted { at: self, remaining: count - offset })
+            Err(Interrupted { at: self, remaining: count - offset })
         }
     }
 
     /// Advances a point while a predicate matches.
-    pub fn forward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, ErrorKind>
+    pub fn forward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Interrupted>
     where
         B: Buffer,
         P: Fn(Self) -> bool,
@@ -120,7 +119,7 @@ impl Cursor {
     }
 
     /// Advances a point while a predicate matches.
-    pub fn backward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, ErrorKind>
+    pub fn backward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Interrupted>
     where
         B: Buffer,
         P: Fn(Self) -> bool,
@@ -133,38 +132,40 @@ impl Cursor {
     }
 
     /// Moves a `Point` forward.
-    pub fn forward<B>(self, count: usize, buffer: &B) -> Result<Self, ErrorKind>
+    pub fn forward<B>(self, count: usize, buffer: &B) -> Result<Self, Interrupted>
     where
         B: Buffer,
     {
         if count == 0 {
             Ok(self)
         } else {
-            self.right(count, buffer).or_else(|err| match err {
-                ErrorKind::Interrupted { at, remaining } => {
-                    at.down(1, buffer).or(Err(err))?.bol(buffer).forward(remaining - 1, buffer)
-                }
+            self.right(count, buffer).or_else(|Interrupted { at, remaining }| {
+                at.down(1, buffer)
+                    .or(Err(Interrupted { at, remaining }))?
+                    .bol(buffer)
+                    .forward(remaining - 1, buffer)
             })
         }
     }
 
     /// Moves a `Point` backwards.
-    pub fn backward<B>(self, count: usize, buffer: &B) -> Result<Self, ErrorKind>
+    pub fn backward<B>(self, count: usize, buffer: &B) -> Result<Self, Interrupted>
     where
         B: Buffer,
     {
         if count == 0 {
             Ok(self)
         } else {
-            self.left(count, buffer).or_else(|err| match err {
-                ErrorKind::Interrupted { at, remaining } => {
-                    at.up(1, buffer).or(Err(err))?.eol(buffer).backward(remaining - 1, buffer)
-                }
+            self.left(count, buffer).or_else(|Interrupted { at, remaining }| {
+                at.up(1, buffer)
+                    .or(Err(Interrupted { at, remaining }))?
+                    .eol(buffer)
+                    .backward(remaining - 1, buffer)
             })
         }
     }
 
-    pub fn forward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, ErrorKind>
+    pub fn forward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, Interrupted>
     where
         B: Buffer,
     {
@@ -179,7 +180,7 @@ impl Cursor {
         })
     }
 
-    pub fn backward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, ErrorKind>
+    pub fn backward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, Interrupted>
     where
         B: Buffer,
     {
@@ -195,12 +196,6 @@ impl Cursor {
                 .right(1, buffer)
         })
     }
-}
-
-pub fn unwrap(result: Result<Cursor, ErrorKind>) -> Cursor {
-    result.unwrap_or_else(|err| match err {
-        ErrorKind::Interrupted { at, .. } => at,
-    })
 }
 
 #[cfg(test)]

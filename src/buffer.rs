@@ -2,7 +2,10 @@ use std::ops::{Bound, RangeBounds};
 
 use crate::cursor::Cursor;
 
-pub trait Buffer {
+// TODO: Check if this is alright.
+pub type Lines<'a, 'b> = Box<dyn Iterator<Item = &'a str> + 'b>;
+
+pub trait Buffer: Clone {
     /// Creates a `Buffer` from a string slice.
     fn from_str(text: &str) -> Self;
 
@@ -24,7 +27,7 @@ pub trait Buffer {
     /// Replaces the specified range in the buffer with the given string.
     fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str);
 
-    /// Inserts a character into this `Buffer + 'a` at the specified position.
+    /// Inserts a character into this `Buffer` at the specified position.
     fn insert(&mut self, point: Cursor, ch: char) {
         self.edit(point..point, ch.to_string().as_str())
     }
