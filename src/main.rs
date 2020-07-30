@@ -108,7 +108,7 @@ where
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(Color::Black));
 
-        frame.render_widget(paragraph, body);
+        frame.render_widget(paragraph, chunks[0]);
         frame.render_widget(debug, chunks[1]);
         frame.set_cursor(cx, cy)
     })?;
@@ -132,7 +132,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         draw(&state, &mut terminal)?;
 
         if let Event::Input(input) = events.next()? {
-            event_loop(&mut state, input).ok_or("")?;
+            if matches!(input, termion::event::Key::Ctrl('d')) {
+                break;
+            }
+
+            event_loop(&mut state, input);
         }
     }
+
+    Ok(())
 }

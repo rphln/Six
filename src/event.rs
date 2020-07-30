@@ -56,7 +56,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { exit_key: Key::Char('q'), tick_rate: Duration::from_millis(500) }
+        Config {
+            exit_key: Key::Char('q'),
+            tick_rate: Duration::from_millis(500),
+        }
     }
 }
 
@@ -94,7 +97,12 @@ impl Events {
                 thread::sleep(config.tick_rate);
             })
         };
-        Events { rx, ignore_exit_key, input_handle, tick_handle }
+        Events {
+            rx,
+            ignore_exit_key,
+            input_handle,
+            tick_handle,
+        }
     }
 
     pub fn next(&self) -> Result<Event<Key>, mpsc::RecvError> {

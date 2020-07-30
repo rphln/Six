@@ -10,7 +10,7 @@ pub struct Cursor {
 
 /// The operation was interrupted too soon.
 #[derive(Debug)]
-pub struct Interrupted {
+pub struct Partial {
     /// Position at which the interruption occurred.
     pub at: Cursor,
 
@@ -24,33 +24,31 @@ impl Cursor {
     }
 
     /// Returns the horizontal position of this `Point`.
-    pub fn col(self, _: &impl Buffer) -> usize {
+    pub fn col(self) -> usize {
         self.x
     }
 
     /// Returns the vertical position of this `Point`.
-    pub fn row(self, _: &impl Buffer) -> usize {
+    pub fn row(self) -> usize {
         self.y
     }
 
     /// Returns the position at the last character of the current line.
-    pub fn eol(mut self, buffer: &impl Buffer) -> Self {
+    pub fn at_eol(mut self, buffer: &impl Buffer) -> Self {
         self.x = buffer.cols(self.y);
         self.w = self.x;
-
         self
     }
 
     /// Returns the position at the first character of the current line.
-    pub fn bol(mut self, _: &impl Buffer) -> Self {
+    pub fn at_bol(mut self, _: &impl Buffer) -> Self {
         self.x = 0;
         self.w = self.x;
-
         self
     }
 
     /// Moves a `Point` forwards inside a line by up to the specified amount.
-    pub fn right(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
+    pub fn at_right(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Partial> {
         let offset = count.min(buffer.cols(self.y) - self.x);
 
         self.x += offset;
@@ -59,12 +57,15 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(Interrupted { at: self, remaining: count - offset })
+            Err(Partial {
+                at: self,
+                remaining: count - offset,
+            })
         }
     }
 
     /// Moves a `Point` backwards inside a line by up to the specified amount.
-    pub fn left(mut self, count: usize, _: &impl Buffer) -> Result<Self, Interrupted> {
+    pub fn at_left(mut self, count: usize, _: &impl Buffer) -> Result<Self, Partial> {
         let offset = count.min(self.x);
 
         self.x -= offset;
@@ -73,12 +74,15 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(Interrupted { at: self, remaining: count - offset })
+            Err(Partial {
+                at: self,
+                remaining: count - offset,
+            })
         }
     }
 
     /// Moves a `Point` downwards by up to the specified amount.
-    pub fn down(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
+    pub fn below(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Partial> {
         let offset = count.min(buffer.rows().saturating_sub(1) - self.y);
 
         self.y += offset;
@@ -87,12 +91,15 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(Interrupted { at: self, remaining: count - offset })
+            Err(Partial {
+                at: self,
+                remaining: count - offset,
+            })
         }
     }
 
     /// Moves a `Point` upwards by up to the specified amount.
-    pub fn up(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Interrupted> {
+    pub fn above(mut self, count: usize, buffer: &impl Buffer) -> Result<Self, Partial> {
         let offset = count.min(self.y);
 
         self.y -= offset;
@@ -101,12 +108,15 @@ impl Cursor {
         if offset == count {
             Ok(self)
         } else {
-            Err(Interrupted { at: self, remaining: count - offset })
+            Err(Partial {
+                at: self,
+                remaining: count - offset,
+            })
         }
     }
 
     /// Advances a point while a predicate matches.
-    pub fn forward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Interrupted>
+    pub fn forward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Partial>
     where
         B: Buffer,
         P: Fn(Self) -> bool,
@@ -119,7 +129,7 @@ impl Cursor {
     }
 
     /// Advances a point while a predicate matches.
-    pub fn backward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Interrupted>
+    pub fn backward_while<B, P>(self, buffer: &B, predicate: P) -> Result<Self, Partial>
     where
         B: Buffer,
         P: Fn(Self) -> bool,
@@ -132,68 +142,76 @@ impl Cursor {
     }
 
     /// Moves a `Point` forward.
-    pub fn forward<B>(self, count: usize, buffer: &B) -> Result<Self, Interrupted>
+    pub fn forward<B>(self, count: usize, buffer: &B) -> Result<Self, Partial>
     where
         B: Buffer,
     {
         if count == 0 {
             Ok(self)
         } else {
-            self.right(count, buffer).or_else(|Interrupted { at, remaining }| {
-                at.down(1, buffer)
-                    .or(Err(Interrupted { at, remaining }))?
-                    .bol(buffer)
-                    .forward(remaining - 1, buffer)
-            })
+            self.at_right(count, buffer)
+                .or_else(|Partial { at, remaining }| {
+                    at.below(1, buffer)
+                        .or(Err(Partial { at, remaining }))?
+                        .at_bol(buffer)
+                        .forward(remaining - 1, buffer)
+                })
         }
     }
 
     /// Moves a `Point` backwards.
-    pub fn backward<B>(self, count: usize, buffer: &B) -> Result<Self, Interrupted>
+    pub fn backward<B>(self, count: usize, buffer: &B) -> Result<Self, Partial>
     where
         B: Buffer,
     {
         if count == 0 {
             Ok(self)
         } else {
-            self.left(count, buffer).or_else(|Interrupted { at, remaining }| {
-                at.up(1, buffer)
-                    .or(Err(Interrupted { at, remaining }))?
-                    .eol(buffer)
-                    .backward(remaining - 1, buffer)
-            })
+            self.at_left(count, buffer)
+                .or_else(|Partial { at, remaining }| {
+                    at.above(1, buffer)
+                        .or(Err(Partial { at, remaining }))?
+                        .at_eol(buffer)
+                        .backward(remaining - 1, buffer)
+                })
         }
     }
 
-    pub fn forward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, Interrupted>
+    pub fn forward_words<B>(self, count: usize, buffer: &B) -> Result<Self, Partial>
     where
         B: Buffer,
     {
         (1..=count).try_fold(self, |cursor, _| {
             cursor
                 .forward_while(buffer, |p| {
-                    buffer.get(p).map(|ch| !ch.is_whitespace()).unwrap_or(false)
+                    buffer
+                        .get(&p)
+                        .map(|ch| !ch.is_whitespace())
+                        .unwrap_or(false)
                 })?
                 .forward_while(buffer, |p| {
-                    buffer.get(p).map(|ch| ch.is_whitespace()).unwrap_or(false)
+                    buffer.get(&p).map(|ch| ch.is_whitespace()).unwrap_or(false)
                 })
         })
     }
 
-    pub fn backward_words<B>(self, count: usize, buffer: &B) -> Result<Cursor, Interrupted>
+    pub fn backward_words<B>(self, count: usize, buffer: &B) -> Result<Self, Partial>
     where
         B: Buffer,
     {
         (1..=count).try_fold(self, |cursor, _| {
             cursor
-                .left(1, buffer)?
+                .at_left(1, buffer)?
                 .backward_while(buffer, |p| {
-                    buffer.get(p).map(|ch| ch.is_whitespace()).unwrap_or(false)
+                    buffer.get(&p).map(|ch| ch.is_whitespace()).unwrap_or(false)
                 })?
                 .backward_while(buffer, |p| {
-                    buffer.get(p).map(|ch| !ch.is_whitespace()).unwrap_or(false)
+                    buffer
+                        .get(&p)
+                        .map(|ch| !ch.is_whitespace())
+                        .unwrap_or(false)
                 })?
-                .right(1, buffer)
+                .at_right(1, buffer)
         })
     }
 }
