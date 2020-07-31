@@ -21,7 +21,6 @@
 /// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 /// SOFTWARE.
-///
 use std::io;
 use std::sync::mpsc;
 use std::sync::{
@@ -56,10 +55,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config {
-            exit_key: Key::Char('q'),
-            tick_rate: Duration::from_millis(500),
-        }
+        Config { exit_key: Key::Char('q'), tick_rate: Duration::from_millis(500) }
     }
 }
 
@@ -97,12 +93,7 @@ impl Events {
                 thread::sleep(config.tick_rate);
             })
         };
-        Events {
-            rx,
-            ignore_exit_key,
-            input_handle,
-            tick_handle,
-        }
+        Events { rx, ignore_exit_key, input_handle, tick_handle }
     }
 
     pub fn next(&self) -> Result<Event<Key>, mpsc::RecvError> {
@@ -115,5 +106,11 @@ impl Events {
 
     pub fn enable_exit_key(&mut self) {
         self.ignore_exit_key.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self::new()
     }
 }

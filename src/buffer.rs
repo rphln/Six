@@ -5,7 +5,7 @@ use crate::cursor::Cursor;
 // TODO: Check if this is alright.
 pub type Lines<'a, 'b> = Box<dyn Iterator<Item = &'a str> + 'b>;
 
-pub trait Buffer: Clone {
+pub trait Buffer: Clone + Default {
     /// Creates a `Buffer` from a string slice.
     fn from_str(text: &str) -> Self;
 
@@ -22,13 +22,13 @@ pub trait Buffer: Clone {
     fn cols(&self, line: usize) -> usize;
 
     /// Returns the `char` at `point`.
-    fn get(&self, point: &Cursor) -> Option<char>;
+    fn get(&self, point: Cursor) -> Option<char>;
 
     /// Replaces the specified range in the buffer with the given string.
     fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str);
 
     /// Inserts a character into this `Buffer` at the specified position.
-    fn insert(&mut self, point: &Cursor, ch: char) {
+    fn insert(&mut self, point: Cursor, ch: char) {
         self.edit(point..point, ch.to_string().as_str())
     }
 
@@ -56,17 +56,14 @@ impl Buffer for String {
     }
 
     fn cols(&self, line: usize) -> usize {
-        self.lines()
-            .nth(line)
-            .expect("Attempt to index past end of `Buffer`")
-            .len()
+        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").len()
     }
 
-    fn get(&self, point: &Cursor) -> Option<char> {
+    fn get(&self, point: Cursor) -> Option<char> {
         self.chars().nth(to_offset(self, point))
     }
 
-    fn insert(&mut self, point: &Cursor, ch: char) {
+    fn insert(&mut self, point: Cursor, ch: char) {
         self.insert(to_offset(self, point), ch);
     }
 
@@ -78,7 +75,7 @@ impl Buffer for String {
     }
 }
 
-fn to_offset(buffer: &str, point: &Cursor) -> usize {
+fn to_offset(buffer: &str, point: Cursor) -> usize {
     let offset = point.col();
 
     buffer
@@ -92,8 +89,8 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
 
     match bound {
         Unbounded => Unbounded,
-        Included(p) => Included(to_offset(buffer, p)),
-        Excluded(p) => Excluded(to_offset(buffer, p)),
+        Included(&p) => Included(to_offset(buffer, p)),
+        Excluded(&p) => Excluded(to_offset(buffer, p)),
     }
 }
 
