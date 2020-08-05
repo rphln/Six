@@ -6,6 +6,8 @@ edition = "2018"
 license = "LGPL-3.0-or-later"
 
 [dependencies]
-tui = "0.10"
+tui = { git = "https://github.com/fdehau/tui-rs" }
 termion = "1.5"
 derivative = "2.1.1"
+im = "15.0.0"
+# wasmer-runtime = "0.13.1"

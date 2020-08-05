@@ -2,10 +2,10 @@
 
 pub mod buffer;
 pub mod cursor;
-pub mod event;
 pub mod state;
+pub mod ui;
 
-pub use buffer::Buffer;
+pub use buffer::Buf;
 pub use cursor::Cursor;
 
 #[macro_use]

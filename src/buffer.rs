@@ -2,80 +2,60 @@ use std::ops::{Bound, RangeBounds};
 
 use crate::cursor::Cursor;
 
-// TODO: Check if this is alright.
-pub type Lines<'a, 'b> = Box<dyn Iterator<Item = &'a str> + 'b>;
+#[derive(Debug, Default)]
+pub struct Buf(String);
 
-pub trait Buffer: Clone + Default {
-    /// Creates a `Buffer` from a string slice.
-    fn from_str(text: &str) -> Self;
+impl Buf {
+    /// Creates a `Buf` from a string slice.
+    pub fn from_str(text: &str) -> Self {
+        Self(text.into())
+    }
 
-    /// Convers this `Buffer` to a string.
-    fn to_string(self) -> String;
+    /// Convers this `Buf` to a string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 
     /// An iterator over the lines of a string, as string slices.
-    fn lines(&self) -> Box<dyn Iterator<Item = &str> + '_>;
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.0.split('\n')
+    }
 
     /// Gets the number of lines in the buffer.
-    fn rows(&self) -> usize;
+    pub fn rows(&self) -> usize {
+        self.lines().count()
+    }
 
     /// Gets the number of characters in the specified line, excluding the line break.
-    fn cols(&self, line: usize) -> usize;
+    pub fn cols(&self, line: usize) -> usize {
+        self.lines().nth(line).expect("Attempt to index past end of `Buf`").len()
+    }
 
     /// Returns the `char` at `point`.
-    fn get(&self, point: Cursor) -> Option<char>;
+    pub fn get(&self, point: Cursor) -> Option<char> {
+        self.0.chars().nth(to_offset(&self.0, point))
+    }
 
     /// Replaces the specified range in the buffer with the given string.
-    fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str);
+    pub fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str) {
+        let start = to_offset_bound(&self.0, range.start_bound());
+        let end = to_offset_bound(&self.0, range.end_bound());
 
-    /// Inserts a character into this `Buffer` at the specified position.
-    fn insert(&mut self, point: Cursor, ch: char) {
-        self.edit(point..point, ch.to_string().as_str())
+        self.0.replace_range((start, end), text.as_ref());
+    }
+
+    /// Inserts a character into this `Buf` at the specified position.
+    pub fn insert(&mut self, point: Cursor, ch: char) {
+        self.0.insert(to_offset(&self.0, point), ch);
     }
 
     /// Deletes the text in the specified range.
-    fn delete(&mut self, range: impl RangeBounds<Cursor>) {
+    pub fn delete(&mut self, range: impl RangeBounds<Cursor>) {
         self.edit(range, "")
     }
 }
 
-impl Buffer for String {
-    fn from_str(text: &str) -> Self {
-        text.into()
-    }
-
-    fn to_string(self) -> String {
-        self
-    }
-
-    fn lines(&self) -> Box<dyn Iterator<Item = &str> + '_> {
-        Box::new(self.split('\n'))
-    }
-
-    fn rows(&self) -> usize {
-        self.lines().count()
-    }
-
-    fn cols(&self, line: usize) -> usize {
-        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").len()
-    }
-
-    fn get(&self, point: Cursor) -> Option<char> {
-        self.chars().nth(to_offset(self, point))
-    }
-
-    fn insert(&mut self, point: Cursor, ch: char) {
-        self.insert(to_offset(self, point), ch);
-    }
-
-    fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str) {
-        let start = to_offset_bound(self, range.start_bound());
-        let end = to_offset_bound(self, range.end_bound());
-
-        self.replace_range((start, end), text.as_ref());
-    }
-}
-
-fn to_offset(buffer: &str, point: Cursor) -> usize {
+fn to_offset(buffer: &String, point: Cursor) -> usize {
     let offset = point.col();
 
     buffer
@@ -84,7 +64,7 @@ fn to_offset(buffer: &str, point: Cursor) -> usize {
         .fold(offset, |offset, line| offset + 1 + line.chars().count())
 }
 
-fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
+fn to_offset_bound(buffer: &String, bound: Bound<&Cursor>) -> Bound<usize> {
     use Bound::*;
 
     match bound {
@@ -113,7 +93,7 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
 //     #[test]
 //     fn test_insert_at_start() {
 //         let mut buffer = String::from("foo");
-//         Buffer::insert(&mut buffer, Point { x: 0, y: 0 }, 'f');
+//         Buf::insert(&mut buffer, Point { x: 0, y: 0 }, 'f');
 
 //         assert_eq!(buffer, "ffoo");
 //     }
@@ -123,7 +103,7 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
 //         let mut buffer = String::from("foo\nbar");
 //         let point = Point { x: 0, y: 1 };
 
-//         Buffer::insert(&mut buffer, point, 'b');
+//         Buf::insert(&mut buffer, point, 'b');
 
 //         assert_eq!(buffer, "foo\nbbar");
 //     }
@@ -133,7 +113,7 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
 //         let mut buffer = String::from("foo\nbar");
 //         let point = Point { x: 0, y: 0 }.eol(&buffer).unwrap();
 
-//         Buffer::insert(&mut buffer, point, 'o');
+//         Buf::insert(&mut buffer, point, 'o');
 
 //         assert_eq!(buffer, "fooo\nbar");
 //     }
@@ -143,7 +123,7 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
 //         let mut buffer = String::from("foo\nbar");
 //         let point = Point { x: 0, y: 1 }.eol(&buffer).unwrap();
 
-//         Buffer::insert(&mut buffer, point, 'r');
+//         Buf::insert(&mut buffer, point, 'r');
 
 //         assert_eq!(buffer, "foo\nbarr");
 //     }

@@ -3,11 +3,11 @@ use std::rc::Rc;
 
 use termion::event::Key;
 
-use crate::buffer::{Buffer, Lines};
+use crate::buffer::Buf;
 use crate::cursor::Cursor;
 
 #[derive(Default, Debug)]
-pub struct State<Buf: Buffer> {
+pub struct State {
     /// Current content.
     buffer: Buf,
 
@@ -15,16 +15,16 @@ pub struct State<Buf: Buffer> {
     cursor: Cursor,
 
     /// Current mode.
-    mode: Mode<Buf>,
+    mode: Mode,
 }
 
-type Callback<Buf, T> = Rc<dyn Fn(&mut State<Buf>, T)>;
+type Callback<T> = Rc<dyn Fn(&mut State, T)>;
 
 type Range = (Cursor, Cursor);
 
-#[derive(Derivative, Clone)]
+#[derive(Clone, Derivative)]
 #[derivative(Debug = "transparent")]
-pub enum Mode<Buf: Buffer> {
+pub enum Mode {
     /// The default editor mode.
     Normal { count: Option<usize> },
 
@@ -36,17 +36,19 @@ pub enum Mode<Buf: Buffer> {
 
     /// Queries the user for a text object and applies an operation.
     Operator {
-        prompt: Option<String>,
+        prompt: String,
+
+        ///  fcar
         count: Option<usize>,
 
         /// Callback invoked once a text object has been provided.
         #[derivative(Debug = "ignore")]
-        callback: Callback<Buf, Range>,
+        callback: Callback<Range>,
     },
 
     /// Queries the user for a text input and applies an operation.
     Query {
-        prompt: Option<String>,
+        prompt: String,
 
         /// Length of the query before the callback is invoked. If `None`,
         /// invokes on `Return`.
@@ -57,11 +59,11 @@ pub enum Mode<Buf: Buffer> {
 
         /// Callback invoked once the input has finished.
         #[derivative(Debug = "ignore")]
-        callback: Callback<Buf, String>,
+        callback: Callback<String>,
     },
 }
 
-impl<Buf: Buffer> State<Buf> {
+impl State {
     pub fn col(&self) -> usize {
         self.cursor.col()
     }
@@ -70,7 +72,7 @@ impl<Buf: Buffer> State<Buf> {
         self.cursor.row()
     }
 
-    pub fn mode(&self) -> &Mode<Buf> {
+    pub fn mode(&self) -> &Mode {
         &self.mode
     }
 
@@ -82,7 +84,7 @@ impl<Buf: Buffer> State<Buf> {
         &self.buffer
     }
 
-    pub fn lines(&self) -> Lines {
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.buffer.lines()
     }
 
@@ -91,7 +93,7 @@ impl<Buf: Buffer> State<Buf> {
         self
     }
 
-    pub fn with_mode(&mut self, mode: impl Fn(Mode<Buf>) -> Mode<Buf>) -> &mut Self {
+    pub fn with_mode(&mut self, mode: impl Fn(Mode) -> Mode) -> &mut Self {
         self.mode = mode(self.mode.clone());
         self
     }
@@ -116,20 +118,20 @@ impl<Buf: Buffer> State<Buf> {
     }
 }
 
-impl<Buf: Buffer> Default for Mode<Buf> {
+impl Default for Mode {
     fn default() -> Self {
         Self::Normal { count: None }
     }
 }
 
-impl<Buf: Buffer> Mode<Buf> {
+impl Mode {
     pub fn with_count(mut self, next: Option<usize>) -> Self {
         match self {
             Mode::Operator { ref mut count, .. }
             | Mode::Normal { ref mut count, .. }
             | Mode::Select { ref mut count, .. } => *count = next,
 
-            _ => panic!("Tried to set count for an incompatible mode"),
+            _ => panic!("Attempt to set count for an incompatible mode"),
         };
 
         self
@@ -140,31 +142,30 @@ impl<Buf: Buffer> Mode<Buf> {
     }
 
     pub fn operator(
-        prompt: Option<String>,
+        prompt: impl Into<String>,
         count: Option<usize>,
-        callback: Callback<Buf, Range>,
+        callback: Callback<Range>,
     ) -> Self {
-        Self::Operator { prompt, count, callback }
+        Self::Operator { prompt: prompt.into(), count, callback }
     }
 
     pub fn query(
-        prompt: Option<String>,
+        prompt: impl Into<String>,
         length: Option<usize>,
-        callback: Callback<Buf, String>,
+        callback: Callback<String>,
     ) -> Self {
-        Self::Query { partial: String::default(), prompt, length, callback }
+        Self::Query { prompt: prompt.into(), partial: String::default(), length, callback }
     }
 }
 
-pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Key) {
+pub fn event_loop(state: &mut State, event: termion::event::Key) {
     use termion::event::Key::{Backspace, Char, Ctrl, Delete, Esc};
     use Mode::{Edit, Normal, Operator, Query, Select};
 
-    // TODO: Replace with an event prefix tree.
     match (state.mode.clone(), event) {
-        (Edit, Esc) => state
-            .with_cursor(|cur, buf| cur.at_left_or_yield(1, buf))
-            .with_mode(|_| Mode::normal(None)),
+        (Edit, Esc) => {
+            state.with_cursor(|cur, buf| cur.at_left(1, buf)).with_mode(|_| Mode::normal(None))
+        },
 
         (_, Esc) => state.with_mode(|_| Mode::normal(None)),
 
@@ -174,14 +175,21 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
         },
 
         (Normal { .. }, Char('i')) => state.with_mode(|_| Edit),
-        (Normal { .. }, Char('a')) => state
-            .with_mode(|_| Edit)
-            .with_cursor(|cursor, buffer| cursor.at_right_or_yield(1, buffer)),
+        (Normal { .. }, Char('a')) => {
+            state.with_mode(|_| Edit).with_cursor(|cursor, buffer| cursor.at_right(1, buffer))
+        },
+
+        (Normal { .. }, Char('I')) => {
+            state.with_mode(|_| Edit).with_cursor(|cursor, buffer| cursor.at_bol(buffer))
+        },
+        (Normal { .. }, Char('A')) => {
+            state.with_mode(|_| Edit).with_cursor(|cursor, buffer| cursor.at_eol(buffer))
+        },
 
         (Normal { .. }, Char('o')) => state
             .with_cursor(|cur, buf| cur.at_eol(buf))
             .insert_at_cursor('\n')
-            .with_cursor(|cur, buf| cur.forward_or_yield(1, buf))
+            .with_cursor(|cur, buf| cur.forward(1, buf))
             .with_mode(|_| Mode::Edit),
 
         (Normal { .. }, Char('O')) => state
@@ -190,18 +198,18 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
             .with_mode(|_| Mode::Edit),
 
         (Normal { .. }, Char('s')) => {
-            let callback = |state: &mut State<Buf>, (start, end): Range| {
+            let callback = |state: &mut State, (start, end): Range| {
                 // Replicates `vim-surround` by skipping any whitespaces at the end.
-                let end = end.backward_while_or_yield(state.buf(), |position| {
-                    let position = position.at_left_or_yield(1, state.buf());
+                let end = end.backward_while(&state.buffer, |position| {
+                    let position = position.at_left(1, &state.buffer);
 
-                    match state.buf().get(position) {
+                    match &state.buffer.get(position) {
                         Some(ch) => ch.is_whitespace(),
                         None => false,
                     }
                 });
 
-                let surround = move |state: &mut State<Buf>, sandwich: String| {
+                let surround = move |state: &mut State, sandwich: String| {
                     let mut chars = sandwich.chars();
 
                     let prefix = chars.next().expect("prefix");
@@ -214,19 +222,15 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
                         .with_cursor(|_, _| start);
                 };
 
-                state.with_mode(|_| {
-                    Mode::query(Some("Surround with".to_string()), Some(2), Rc::new(surround))
-                });
+                state.with_mode(|_| Mode::query("Surround with", Some(2), Rc::new(surround)));
             };
 
-            state.with_mode(|_| {
-                Mode::operator(Some("Surround".to_string()), None, Rc::new(callback))
-            })
+            state.with_mode(|_| Mode::operator("Surround", None, Rc::new(callback)))
         },
 
         (Normal { count }, Char('d')) => state.with_mode(|_| {
             Mode::operator(
-                Some("Delete".to_string()),
+                "Delete",
                 count,
                 Rc::new(|state, (start, end)| {
                     state
@@ -239,9 +243,9 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
 
         (Normal { .. }, Char(';')) => state.with_mode(|_| {
             Mode::query(
-                Some("Eval".to_string()),
+                "Eval",
                 None,
-                Rc::new(|state, command| {
+                Rc::new(|state, _| {
                     state.with_mode(|_| Mode::default());
                 }),
             )
@@ -249,7 +253,7 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
 
         (Operator { callback, count, .. }, Char('W')) => {
             let start = state.cursor;
-            let end = start.forward_words_or_yield(count.unwrap_or(1), state.buf());
+            let end = start.forward_words(count.unwrap_or(1), &state.buffer);
 
             callback(state, (start, end));
             state
@@ -257,7 +261,7 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
 
         (Operator { callback, count, .. }, Char('B')) => {
             let end = state.cursor;
-            let start = end.backward_words_or_yield(count.unwrap_or(1), state.buf());
+            let start = end.backward_words(count.unwrap_or(1), &state.buffer);
 
             callback(state, (start, end));
             state
@@ -290,11 +294,11 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
         },
 
         (Edit, Char(ch)) => {
-            state.insert(state.cursor, ch).with_cursor(|cur, buf| cur.forward_or_yield(1, buf))
+            state.insert(state.cursor, ch).with_cursor(|cur, buf| cur.forward(1, buf))
         },
 
         (Edit, Backspace) => {
-            state.with_cursor(|cur, buf| cur.at_left_or_yield(1, buf));
+            state.with_cursor(|cur, buf| cur.at_left(1, buf));
 
             if state.buffer.get(state.cursor).is_some() {
                 state.delete(state.cursor..=state.cursor);
@@ -314,7 +318,7 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
         (Edit, Ctrl('w')) => {
             let anchor = state.cursor().clone();
 
-            state.with_cursor(|cur, buf| cur.backward_words_or_yield(1, buf));
+            state.with_cursor(|cur, buf| cur.backward_words(1, buf));
             state.delete(state.cursor..anchor);
 
             state
@@ -322,44 +326,44 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
 
         (Normal { count, .. }, Char('W')) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.forward_words_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.forward_words(count.unwrap_or(1), buf)),
 
         (Normal { count, .. }, Char('B')) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.backward_words_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.backward_words(count.unwrap_or(1), buf)),
 
         (Normal { count, .. }, Char('h'))
         | (Select { count, .. }, Char('h'))
         | (Normal { count, .. }, Key::Left)
         | (Select { count, .. }, Key::Left) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.at_left_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.at_left(count.unwrap_or(1), buf)),
 
         (Normal { count, .. }, Char('j'))
         | (Select { count, .. }, Char('j'))
         | (Normal { count, .. }, Key::Down)
         | (Select { count, .. }, Key::Down) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.below_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.below(count.unwrap_or(1), buf)),
 
         (Normal { count, .. }, Char('k'))
         | (Select { count, .. }, Char('k'))
         | (Normal { count, .. }, Key::Up)
         | (Select { count, .. }, Key::Up) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.above_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.above(count.unwrap_or(1), buf)),
 
         (Normal { count, .. }, Char('l'))
         | (Select { count, .. }, Char('l'))
         | (Normal { count, .. }, Key::Right)
         | (Select { count, .. }, Key::Right) => state
             .with_mode(|mode| mode.with_count(None))
-            .with_cursor(|cur, buf| cur.at_right_or_yield(count.unwrap_or(1), buf)),
+            .with_cursor(|cur, buf| cur.at_right(count.unwrap_or(1), buf)),
 
-        (Edit, Key::Left) => state.with_cursor(|cur, buf| cur.at_left_or_yield(1, buf)),
-        (Edit, Key::Down) => state.with_cursor(|cur, buf| cur.below_or_yield(1, buf)),
-        (Edit, Key::Up) => state.with_cursor(|cur, buf| cur.above_or_yield(1, buf)),
-        (Edit, Key::Right) => state.with_cursor(|cur, buf| cur.at_right_or_yield(1, buf)),
+        (Edit, Key::Left) => state.with_cursor(|cur, buf| cur.at_left(1, buf)),
+        (Edit, Key::Down) => state.with_cursor(|cur, buf| cur.below(1, buf)),
+        (Edit, Key::Up) => state.with_cursor(|cur, buf| cur.above(1, buf)),
+        (Edit, Key::Right) => state.with_cursor(|cur, buf| cur.at_right(1, buf)),
 
         (Normal { count }, Char(ch @ '0'..='9'))
         | (Select { count, .. }, Char(ch @ '0'..='9'))
@@ -375,35 +379,3 @@ pub fn event_loop<Buf: Buffer>(state: &mut State<Buf>, event: termion::event::Ke
         _ => state,
     };
 }
-
-// pub fn event_loop<Buf: Buffer>(state: State<Buf>, event: Key) -> Option<State<Buf>> {
-
-//     if matches!(event, Ctrl('d')) {
-//         return None;
-//     }
-
-//     match (&state.mode, event) {
-
-//         (Normal { .. }, Char('i')) => state.with_mode(Edit),
-//         (Normal { .. }, Char('a')) => {
-//             state.with_mode(Edit);
-//             state.right(1);
-//         }
-
-//         (Normal { .. }, Char('I')) => {
-//             state.bol();
-//             state.with_mode(Edit);
-//         }
-//         (Normal { .. }, Char('A')) => {
-//             state.eol();
-//             state.with_mode(Edit);
-//         }
-
-//         (Operator { callback, count, .. }, Char('B')) => {
-//             let start = state
-//                 .cursor
-//                 .backward_words(count.unwrap_or(1), state.buffer)
-//                 .unwrap_or_else(|e| e.at);
-
-//             *state = callback.0(state.clone(), (start, state.cursor));
-//         }

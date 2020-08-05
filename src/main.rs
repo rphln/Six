@@ -1,138 +1,89 @@
 use std::error::Error;
 use std::io;
 
-use tui::backend::{Backend, TermionBackend};
-use tui::text::Text;
+use tui::{
+    backend::{Backend, TermionBackend},
+    layout::{Alignment, Rect},
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::Span,
+    widgets::Paragraph,
+    Frame, Terminal,
+};
 
-use tui::style::{Color, Modifier, Style};
-use tui::text::{Span, Spans};
-use tui::widgets::{Block, Borders, Paragraph, Wrap};
-use tui::Terminal;
+use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
-use termion::input::MouseTerminal;
-use termion::input::TermRead;
-use termion::raw::IntoRawMode;
-use termion::screen::AlternateScreen;
+use six::{
+    state::{event_loop, Mode, State},
+    ui::buffer_view::{TextEditState, TextEditView},
+};
 
-use six::buffer::Buffer;
-use six::cursor::Cursor;
-use six::state::event_loop;
-use six::state::{Mode, State};
-
-use six::event::{Event, Events};
-
-fn draw<W, B>(state: &State<B>, terminal: &mut Terminal<W>) -> Result<(), Box<dyn Error>>
-where
-    W: Backend + io::Write,
-    B: Buffer + std::fmt::Debug,
-{
-    if matches!(state.mode(), six::state::Mode::Edit) {
-        write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?;
-    } else {
-        write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?;
+fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &mut State) {
+    let mode = match state.mode() {
+        Mode::Normal { .. } => "Normal",
+        Mode::Edit { .. } => "Edit",
+        Mode::Select { .. } => "Select",
+        Mode::Query { prompt, .. } => prompt.as_ref(),
+        Mode::Operator { prompt, .. } => prompt.as_ref(),
     };
 
-    terminal.draw(|frame| {
-        use tui::layout::{Constraint, Layout};
+    let ruler = format!("{},{}", state.row(), state.col());
 
+    let partial =
+        if let Mode::Query { partial, .. } = state.mode() { partial.as_ref() } else { "" };
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Length(mode.len() as u16 + 1),
+            Constraint::Min(1),
+            Constraint::Length(ruler.len() as u16 + 1),
+        ])
+        .split(area);
+
+    let mut stat = TextEditState::new(partial, partial.len() as u16, 0);
+    let view = TextEditView::new();
+
+    if let Mode::Query { .. } = state.mode() {
+        view.focus(chunks[1], frame, &stat);
+    }
+
+    let emphasis = Style::default().fg(Color::Green);
+
+    let mode = Span::styled(mode, emphasis);
+    let mode = Paragraph::new(mode);
+
+    let ruler = Span::styled(ruler, emphasis);
+    let ruler = Paragraph::new(ruler).alignment(Alignment::Right);
+
+    frame.render_widget(mode, chunks[0]);
+    frame.render_widget(ruler, chunks[2]);
+    frame.render_stateful_widget(view, chunks[1], &mut stat);
+}
+
+fn draw<B>(terminal: &mut Terminal<B>, state: &mut State) -> Result<(), Box<dyn Error>>
+where
+    B: Backend + io::Write,
+{
+    match state.mode() {
+        Mode::Edit { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
+        Mode::Query { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::BlinkingBar)?,
+
+        _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
+    }
+
+    terminal.draw(|frame| {
         let chunks = Layout::default()
-            .margin(1)
-            .constraints(
-                [Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)].as_ref(),
-            )
+            .constraints(vec![Constraint::Min(1), Constraint::Length(1)])
             .split(frame.size());
 
-        let body = chunks[0];
+        let mut stat = TextEditState::from(&state);
+        let view = TextEditView::new();
 
-        let x = state.col() as u16;
-        let y = state.row() as u16;
+        view.focus(chunks[0], frame, &stat);
 
-        let width = body.width.saturating_sub(1);
-        let height = body.height.saturating_sub(1);
-
-        let sx = x.saturating_sub(width);
-        let sy = y.saturating_sub(height);
-
-        let cx = body.x + x.min(width);
-        let cy = body.y + y.min(height);
-
-        let spans: Vec<_> = state
-            .lines()
-            .enumerate()
-            .map(|(row, line)| {
-                if let Mode::Select { anchor, .. } = state.mode() {
-                    let begin = *state.cursor().min(anchor);
-                    let end = *state.cursor().max(anchor);
-
-                    let mut prefix: usize = 0;
-                    let mut infix: usize = 0;
-                    let mut suffix: usize = 0;
-
-                    for (col, _) in line.chars().enumerate() {
-                        let point = Cursor::new(col, row);
-
-                        if point < begin {
-                            prefix += 1;
-                        } else if point > end {
-                            suffix += 1;
-                        } else {
-                            infix += 1;
-                        }
-                    }
-
-                    infix += prefix;
-                    suffix += infix;
-
-                    let default = Style::default();
-                    let colored = default.add_modifier(Modifier::UNDERLINED);
-
-                    return Spans::from(vec![
-                        Span::raw(line[..prefix].to_string()),
-                        Span::styled(line[prefix..infix].to_string(), colored),
-                        Span::raw(line[infix..suffix].to_string()),
-                    ]);
-                }
-
-                Spans::from(line)
-            })
-            .collect();
-
-        let paragraph = Paragraph::new(spans).scroll((sy, sx));
-
-        let debug = format!("{:?}", state);
-        let debug = debug.as_str();
-        let debug = Paragraph::new(debug)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::Black));
-
-        let mode = match state.mode().clone() {
-            Mode::Normal { .. } => "Normal".to_string(),
-            Mode::Edit { .. } => "Edit".to_string(),
-            Mode::Select { .. } => "Select".to_string(),
-            Mode::Query { prompt, .. } => prompt.unwrap_or("Query".to_string()),
-            Mode::Operator { prompt, .. } => prompt.unwrap_or("Operator".to_string()),
-        };
-
-        let partial = if let Mode::Query { partial, .. } = state.mode() {
-            let partial = format!(" {}", partial);
-            let x = (mode.len() + partial.len()) as u16;
-            frame.set_cursor(chunks[1].x + x, chunks[1].y);
-            partial
-        } else {
-            frame.set_cursor(cx, cy);
-            String::default()
-        };
-
-        let modeline = Spans::from(vec![
-            Span::styled(mode, Style::default().add_modifier(Modifier::BOLD).fg(Color::Green)),
-            Span::raw(partial),
-        ]);
-
-        let modeline = Paragraph::new(modeline);
-
-        frame.render_widget(paragraph, chunks[0]);
-        frame.render_widget(modeline, chunks[1]);
-        frame.render_widget(debug, chunks[2]);
+        frame.render_stateful_widget(view, chunks[0], &mut stat);
+        draw_status_line(frame, chunks[1], state);
     })?;
 
     Ok(())
@@ -147,18 +98,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = State::<String>::default();
-    let events = Events::new();
+    let mut state = State::default();
 
     loop {
-        draw(&state, &mut terminal)?;
+        draw(&mut terminal, &mut state)?;
 
-        if let Event::Input(input) = events.next()? {
-            if matches!(input, termion::event::Key::Ctrl('d')) {
+        if let Some(key) = io::stdin().keys().next() {
+            let key = key?;
+
+            if matches!(key, termion::event::Key::Ctrl('d')) {
                 break;
             }
 
-            event_loop(&mut state, input);
+            event_loop(&mut state, key);
         }
     }
 
