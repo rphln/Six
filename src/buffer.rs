@@ -1,52 +1,51 @@
+use std::borrow::Borrow;
 use std::ops::{Bound, RangeBounds};
 
 use crate::cursor::Cursor;
 
-#[derive(Debug, Default)]
+pub trait BufferView {
+    /// Returns the number of characters in the buffer.
+    fn len(&self) -> usize;
+
+    /// Returns whether the buffer is empty.
+    fn is_empty(&self) -> bool;
+
+    /// Returns the number of lines in the buffer.
+    fn rows(&self) -> usize;
+
+    /// Returns the number of characters in the specified line, excluding the line break.
+    fn cols_at(&self, line: usize) -> usize;
+
+    /// Returns the point at which this view was created.
+    fn origin(&self) -> Cursor;
+
+    /// Returns the `char` at `point`.
+    fn get(&self, point: impl Borrow<Cursor>) -> Option<char>;
+
+    /// Convers this `Buf` to a string.
+    fn as_str(&self) -> &str;
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Buf(String);
 
 impl Buf {
-    /// Creates a `Buf` from a string slice.
-    pub fn from_str(text: &str) -> Self {
-        Self(text.into())
-    }
-
-    /// Convers this `Buf` to a string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
     /// An iterator over the lines of a string, as string slices.
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.0.split('\n')
     }
 
-    /// Gets the number of lines in the buffer.
-    pub fn rows(&self) -> usize {
-        self.lines().count()
-    }
-
-    /// Gets the number of characters in the specified line, excluding the line break.
-    pub fn cols(&self, line: usize) -> usize {
-        self.lines().nth(line).expect("Attempt to index past end of `Buf`").len()
-    }
-
-    /// Returns the `char` at `point`.
-    pub fn get(&self, point: Cursor) -> Option<char> {
-        self.0.chars().nth(to_offset(&self.0, point))
-    }
-
     /// Replaces the specified range in the buffer with the given string.
     pub fn edit(&mut self, range: impl RangeBounds<Cursor>, text: &str) {
-        let start = to_offset_bound(&self.0, range.start_bound());
-        let end = to_offset_bound(&self.0, range.end_bound());
+        let start = to_offset_bound(self.0.as_ref(), range.start_bound());
+        let end = to_offset_bound(self.0.as_ref(), range.end_bound());
 
         self.0.replace_range((start, end), text.as_ref());
     }
 
     /// Inserts a character into this `Buf` at the specified position.
-    pub fn insert(&mut self, point: Cursor, ch: char) {
-        self.0.insert(to_offset(&self.0, point), ch);
+    pub fn insert(&mut self, point: impl Borrow<Cursor>, ch: char) {
+        self.0.insert(to_offset(self.0.as_ref(), point.borrow()), ch);
     }
 
     /// Deletes the text in the specified range.
@@ -55,7 +54,47 @@ impl Buf {
     }
 }
 
-fn to_offset(buffer: &String, point: Cursor) -> usize {
+impl From<&str> for Buf {
+    /// Creates a `Buf` from a string slice.
+    fn from(text: &str) -> Self {
+        Self(text.into())
+    }
+}
+
+// TODO: Implement `BufferView` for `Buf` slices, so we can call `Cursor` methods using slices.
+
+impl BufferView for Buf {
+    /// Convers this `Buf` to a string.
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn origin(&self) -> Cursor {
+        Cursor::new(0, 0)
+    }
+
+    fn rows(&self) -> usize {
+        self.lines().count()
+    }
+
+    fn cols_at(&self, line: usize) -> usize {
+        self.lines().nth(line).expect("Attempt to index past end of `Buf`").len()
+    }
+
+    fn get(&self, point: impl Borrow<Cursor>) -> Option<char> {
+        self.0.chars().nth(to_offset(self.0.as_ref(), point.borrow()))
+    }
+}
+
+fn to_offset(buffer: &str, point: &Cursor) -> usize {
     let offset = point.col();
 
     buffer
@@ -64,13 +103,13 @@ fn to_offset(buffer: &String, point: Cursor) -> usize {
         .fold(offset, |offset, line| offset + 1 + line.chars().count())
 }
 
-fn to_offset_bound(buffer: &String, bound: Bound<&Cursor>) -> Bound<usize> {
+fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
     use Bound::*;
 
     match bound {
         Unbounded => Unbounded,
-        Included(&p) => Included(to_offset(buffer, p)),
-        Excluded(&p) => Excluded(to_offset(buffer, p)),
+        Included(p) => Included(to_offset(buffer, p)),
+        Excluded(p) => Excluded(to_offset(buffer, p)),
     }
 }
 

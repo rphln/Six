@@ -7,6 +7,3 @@ pub mod ui;
 
 pub use buffer::Buf;
 pub use cursor::Cursor;
-
-#[macro_use]
-extern crate derivative;
