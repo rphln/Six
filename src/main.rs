@@ -119,17 +119,17 @@ where
     }
 
     terminal.draw(|frame| {
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Min(1), Constraint::Length(1)])
-            .split(frame.size());
-
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(vec![Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)])
-            .split(vertical[0]);
+            .split(frame.size());
 
-        draw_edit_view(frame, horizontal[0], state);
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Min(1), Constraint::Length(1)])
+            .split(horizontal[0]);
+
+        draw_edit_view(frame, vertical[0], state);
         draw_status_line(frame, vertical[1], state);
 
         draw_debug_view(frame, horizontal[1], state);
