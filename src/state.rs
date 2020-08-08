@@ -7,7 +7,7 @@ use std::error::Error;
 use termion::event::Key;
 
 use rlua::{
-    // Function,
+    Function,
     // MetaMethod,
     // Variadic,
     Lua,
@@ -16,7 +16,7 @@ use rlua::{
 };
 
 use crate::buffer::{Buf, BufferView};
-use crate::cursor::Cursor;
+use crate::cursor::{Bounded, Cursor, CursorIterator, Line, Paragraph, Unbounded, Word};
 
 #[derive(Debug, Clone, Default)]
 pub struct EditView {
@@ -46,8 +46,17 @@ impl EditView {
     }
 
     /// Updates the cursor position by applying a function over its previous value.
+    #[inline]
     pub fn with_cursor(&mut self, map: impl FnOnce(Cursor, &Buf) -> Cursor) {
         self.cursor = map(self.cursor(), self.buffer());
+    }
+
+    /// Attempts to update the cursor position by applying a function over its previous value.
+    ///
+    /// Maintains the original position on failure.
+    #[inline]
+    pub fn try_with_cursor(&mut self, map: impl FnOnce(Cursor, &Buf) -> Option<Cursor>) {
+        self.cursor = map(self.cursor(), self.buffer()).unwrap_or(self.cursor);
     }
 }
 
@@ -70,12 +79,6 @@ impl<T, U> Callback<T> for U where
     U: Send + Sync + 'static + Fn(&mut State, &mut Lua, T) -> Result<(), Box<dyn Error>>
 {
 }
-
-// impl<'a, T: ?Sized + 'a> fmt::Debug for dyn Callback<&'a T> {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         f.write_str(std::any::type_name::<Self>())
-//     }
-// }
 
 impl fmt::Debug for dyn Callback<Range> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -129,7 +132,22 @@ pub enum Mode {
     },
 }
 
-impl UserData for Cursor {}
+impl UserData for &Buf {}
+impl UserData for &Cursor {}
+
+impl<'a, B: 'a + BufferView> UserData for CursorIterator<'a, B, Unbounded> {
+    fn add_methods<'lua, U: UserDataMethods<'lua, Self>>(methods: &mut U) {
+        methods.add_method_mut("next", |_, iter, ()| Ok(iter.next()))
+    }
+}
+
+impl UserData for Cursor {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
+        methods.add_method("forward", |_, &cursor, (count, buffer): (usize, &Buf)| {
+            Ok(cursor.iter::<_, Unbounded>(buffer).take(count).last().unwrap_or(cursor))
+        })
+    }
+}
 
 impl UserData for &mut State {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
@@ -170,6 +188,14 @@ impl State {
     #[inline]
     pub fn with_cursor(&mut self, map: impl FnOnce(Cursor, &Buf) -> Cursor) {
         self.view.with_cursor(map)
+    }
+
+    /// Attempts to update the cursor position by applying a function over its previous value.
+    ///
+    /// Maintains the original position on failure.
+    #[inline]
+    pub fn try_with_cursor(&mut self, map: impl FnOnce(Cursor, &Buf) -> Option<Cursor>) {
+        self.view.try_with_cursor(map)
     }
 
     /// Returns a reference to the text buffer.
@@ -265,7 +291,8 @@ pub fn event_loop(
 
     match (state.mode().clone(), event) {
         (Edit, Esc) => {
-            state.with_cursor(|cur, buffer| cur.at_left(1, buffer));
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next_back());
+
             state.with_mode(|_| Mode::normal(None));
         },
 
@@ -279,41 +306,52 @@ pub fn event_loop(
         (Normal { .. }, Char('i')) => state.with_mode(|_| Edit),
         (Normal { .. }, Char('a')) => {
             state.with_mode(|_| Edit);
-            state.with_cursor(|cursor, buffer| cursor.at_right(1, buffer))
+            state.try_with_cursor(|cursor, buffer| cursor.iter::<_, Bounded>(buffer).next())
         },
 
         (Normal { .. }, Char('I')) => {
             state.with_mode(|_| Edit);
-            state.with_cursor(|cursor, buffer| cursor.at_bol(buffer));
+            state.try_with_cursor(|cursor, buffer| cursor.iter::<_, Bounded>(buffer).rev().last());
         },
         (Normal { .. }, Char('A')) => {
             state.with_mode(|_| Edit);
-            state.with_cursor(|cursor, buffer| cursor.at_eol(buffer));
+            state.try_with_cursor(|cursor, buffer| cursor.iter::<_, Bounded>(buffer).last());
         },
 
         (Normal { .. }, Char('o')) => {
-            let eol = state.cursor().at_eol(state.buffer());
+            let eol = state
+                .cursor()
+                .iter::<_, Bounded>(state.buffer())
+                .last()
+                .unwrap_or_else(|| state.cursor());
             state.insert(eol, '\n');
 
-            state.with_cursor(|_, buffer| eol.forward(1, buffer));
+            state.try_with_cursor(|_, buffer| eol.iter::<_, Unbounded>(buffer).next());
             state.with_mode(|_| Mode::Edit);
         },
 
         (Normal { .. }, Char('O')) => {
-            let bol = state.cursor().at_bol(state.buffer());
+            let bol = state
+                .cursor()
+                .iter::<_, Bounded>(state.buffer())
+                .rev()
+                .last()
+                .unwrap_or_else(|| state.cursor());
             state.insert(bol, '\n');
 
-            state.with_cursor(|_, buffer| bol.backward(1, buffer));
+            state.try_with_cursor(|_, buffer| bol.iter::<_, Unbounded>(buffer).next_back());
             state.with_mode(|_| Mode::Edit);
         },
 
         (Normal { .. }, Char('s')) => {
             let surround = |state: &mut State, _lua: &mut Lua, (start, end): Range| {
                 // Replicates `vim-surround` by skipping any whitespaces at the end.
-                let end = end.backward_while(state.buffer(), |position| {
-                    let position = position.at_left(1, state.buffer());
-                    state.buffer().get(position)?.is_whitespace().into()
-                });
+                let buf = state.buffer();
+                let end = end
+                    .iter::<_, Unbounded>(buf)
+                    .rev()
+                    .find(|p| buf.get(p).map(|ch| !ch.is_whitespace()).unwrap_or(true))
+                    .unwrap_or(end);
 
                 let surround = move |state: &mut State, _lua: &mut Lua, sandwich: &str| {
                     let mut chars = sandwich.chars();
@@ -372,17 +410,49 @@ pub fn event_loop(
             });
         },
 
-        (Normal { count }, Char('f')) => state.with_mode(|_| {
+        (Normal { .. }, Char('u')) => state.with_mode(|_| {
+            Mode::query(
+                "Eval & Forward",
+                None,
+                |state: &mut State, lua: &mut Lua, program: &str| {
+                    state.with_mode(|_| Mode::default());
+
+                    state.try_with_cursor(|cursor, buffer| {
+                        lua.context::<_, Option<Cursor>>(|ctx| {
+                            ctx.scope(|scope| {
+                                let iter = cursor.iter::<_, Unbounded>(buffer);
+                                let iter = scope.create_nonstatic_userdata(iter);
+
+                                ctx.load(program)
+                                    .eval::<Function>()
+                                    .unwrap()
+                                    .call::<_, Option<Cursor>>(iter)
+                                    .unwrap()
+                            })
+                        })
+                    });
+
+                    Ok(())
+                },
+            )
+        }),
+
+        (Normal { count }, Char('t')) => state.with_mode(|_| {
             Mode::query("Jump to next", Some(1), move |state: &mut State, _: &mut Lua, ch: &str| {
                 let ch = ch.chars().next().expect("ch");
 
-                state.with_cursor(|cur, buf| {
-                    (1..=count.unwrap_or(1))
-                        .try_fold(cur, |cur, _| {
-                            cur.try_forward(1, buf)?
-                                .try_forward_while(buf, |p| Some(buf.get(p)? != ch))
+                state.try_with_cursor(|cur, buf| {
+                    let count = count.unwrap_or(1);
+
+                    let mut it = cur.iter::<_, Bounded>(buf);
+                    (1..=count).fold(None, |_, _| {
+                        it.find(|p| {
+                            p.iter::<_, Bounded>(buf)
+                                .next()
+                                .map(|p| buf.get(p).map(|other| other == ch).expect("get"))
+                                .unwrap_or(false)
                         })
-                        .unwrap_or(cur)
+                    })
                 });
 
                 state.with_mode(|_| Normal { count: None });
@@ -393,14 +463,20 @@ pub fn event_loop(
 
         (Operator { ref callback, count, .. }, Char('W')) => {
             let start = state.cursor();
-            let end = start.forward_words(count.unwrap_or(1), state.buffer());
+            let end =
+                start.iter::<_, Word>(state.buffer()).take(count.unwrap_or(1)).last().expect("end");
 
             callback(state, lua, (start, end))?;
         },
 
         (Operator { callback, count, .. }, Char('B')) => {
             let end = state.cursor();
-            let start = end.backward_words(count.unwrap_or(1), state.buffer());
+            let start = end
+                .iter::<_, Word>(state.buffer())
+                .rev()
+                .take(count.unwrap_or(1))
+                .last()
+                .expect("start");
 
             callback(state, lua, (start, end))?;
         },
@@ -409,7 +485,7 @@ pub fn event_loop(
             let at = partial.cursor();
             partial.buffer_mut().insert(at, ch);
 
-            partial.with_cursor(|cur, buffer| cur.forward(1, buffer));
+            partial.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next());
 
             match length {
                 None if ch == '\n' => callback(state, lua, partial.buffer().as_str()),
@@ -427,7 +503,7 @@ pub fn event_loop(
         (Query { .. }, Backspace) => {
             state.with_mode(|mode| {
                 mode.with_partial(|partial| {
-                    partial.with_cursor(|cur, buf| cur.backward(1, buf));
+                    partial.try_with_cursor(|cur, buf| cur.iter::<_, Unbounded>(buf).next_back());
 
                     let cursor = partial.cursor();
                     if partial.buffer().get(cursor).is_some() {
@@ -439,11 +515,11 @@ pub fn event_loop(
 
         (Edit, Char(ch)) => {
             state.insert(state.cursor(), ch);
-            state.with_cursor(|cur, buffer| cur.forward(1, buffer));
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next());
         },
 
         (Edit, Backspace) => {
-            state.with_cursor(|cur, buffer| cur.backward(1, buffer));
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next_back());
 
             let cursor = state.cursor();
             if state.buffer().get(cursor).is_some() {
@@ -461,18 +537,22 @@ pub fn event_loop(
         (Edit, Ctrl('w')) => {
             let anchor = state.cursor();
 
-            state.with_cursor(|cur, buffer| cur.backward_words(1, buffer));
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Word>(buffer).next_back());
             state.delete(state.cursor()..anchor);
         },
 
         (Normal { count, .. }, Char('W')) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.forward_words(count.unwrap_or(1), buffer));
+            state.try_with_cursor(|cur, buffer| {
+                cur.iter::<_, Word>(buffer).take(count.unwrap_or(1)).last()
+            });
         },
 
         (Normal { count, .. }, Char('B')) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.backward_words(count.unwrap_or(1), buffer));
+            state.try_with_cursor({
+                |cur, buffer| cur.iter::<_, Word>(buffer).rev().take(count.unwrap_or(1)).last()
+            });
         },
 
         (Normal { count, .. }, Char('h'))
@@ -480,7 +560,9 @@ pub fn event_loop(
         | (Normal { count, .. }, Key::Left)
         | (Select { count, .. }, Key::Left) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.at_left(count.unwrap_or(1), buffer));
+            state.try_with_cursor({
+                |cur, buffer| cur.iter::<_, Bounded>(buffer).rev().take(count.unwrap_or(1)).last()
+            });
         },
 
         (Normal { count, .. }, Char('j'))
@@ -488,7 +570,9 @@ pub fn event_loop(
         | (Normal { count, .. }, Key::Down)
         | (Select { count, .. }, Key::Down) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.below(count.unwrap_or(1), buffer));
+            state.try_with_cursor({
+                |cur, buffer| cur.iter::<_, Line>(buffer).take(count.unwrap_or(1)).last()
+            });
         },
 
         (Normal { count, .. }, Char('k'))
@@ -496,7 +580,9 @@ pub fn event_loop(
         | (Normal { count, .. }, Key::Up)
         | (Select { count, .. }, Key::Up) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.above(count.unwrap_or(1), buffer));
+            state.try_with_cursor(|cur, buffer| {
+                cur.iter::<_, Line>(buffer).rev().take(count.unwrap_or(1)).last()
+            });
         },
 
         (Normal { count, .. }, Char('l'))
@@ -504,13 +590,38 @@ pub fn event_loop(
         | (Normal { count, .. }, Key::Right)
         | (Select { count, .. }, Key::Right) => {
             state.with_mode(|mode| mode.with_count(None));
-            state.with_cursor(|cur, buffer| cur.at_right(count.unwrap_or(1), buffer));
+            state.try_with_cursor({
+                |cur, buffer| cur.iter::<_, Bounded>(buffer).take(count.unwrap_or(1)).last()
+            });
         },
 
-        (Edit { .. }, Key::Left) => state.with_cursor(|cur, buffer| cur.at_left(1, buffer)),
-        (Edit { .. }, Key::Down) => state.with_cursor(|cur, buffer| cur.below(1, buffer)),
-        (Edit { .. }, Key::Up) => state.with_cursor(|cur, buffer| cur.above(1, buffer)),
-        (Edit { .. }, Key::Right) => state.with_cursor(|cur, buffer| cur.at_right(1, buffer)),
+        (Normal { count, .. }, Char('{')) | (Select { count, .. }, Char('{')) => {
+            state.with_mode(|mode| mode.with_count(None));
+            state.try_with_cursor(|cur, buffer| {
+                cur.iter::<_, Paragraph>(buffer).rev().take(count.unwrap_or(1)).last()
+            });
+        },
+
+        (Normal { count, .. }, Char('}')) | (Select { count, .. }, Char('}')) => {
+            state.with_mode(|mode| mode.with_count(None));
+            state.try_with_cursor({
+                |cur, buffer| cur.iter::<_, Paragraph>(buffer).take(count.unwrap_or(1)).last()
+            });
+        },
+
+        (Edit { .. }, Key::Left) => {
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next())
+        },
+        (Edit { .. }, Key::Up) => {
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Line>(buffer).next_back())
+        },
+
+        (Edit { .. }, Key::Down) => {
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Line>(buffer).next())
+        },
+        (Edit { .. }, Key::Right) => {
+            state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next_back())
+        },
 
         (Normal { count }, Char(ch @ '0'..='9'))
         | (Select { count, .. }, Char(ch @ '0'..='9'))

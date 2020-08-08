@@ -1,7 +1,10 @@
-use std::error::Error;
-use std::fmt;
+use std::marker::PhantomData;
+use std::ops::Not;
 
 use crate::buffer::BufferView;
+
+// TODO: Make this derivable.
+pub trait Metric {}
 
 /// A text buffer coordinate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord)]
@@ -12,17 +15,8 @@ pub struct Cursor {
     offset: usize,
 }
 
-/// The operation was interrupted too soon.
-#[derive(Debug, Clone, Copy)]
-pub struct Partial {
-    /// Position at which the interruption occurred.
-    pub at: Cursor,
-
-    /// Remaining units to move.
-    pub remaining: usize,
-}
-
 impl Cursor {
+    /// Creates a new cursor at the specified coordinates.
     pub fn new(col: usize, row: usize) -> Self {
         Self { row, col, offset: col }
     }
@@ -37,261 +31,236 @@ impl Cursor {
         self.row
     }
 
-    /// Returns the position at the last character of the current line.
-    pub fn at_eol(mut self, buffer: &impl BufferView) -> Self {
-        self.col = buffer.cols_at(self.row);
-        self
-    }
-
-    /// Returns the position at the first character of the current line.
-    pub fn at_bol(mut self, _: &impl BufferView) -> Self {
-        self.col = 0;
-        self
-    }
-
-    /// Moves a `Cursor` forwards inside a line by up to the specified amount.
-    pub fn try_at_right(mut self, count: usize, buffer: &impl BufferView) -> Result<Self, Partial> {
-        let offset = count.min(buffer.cols_at(self.row) - self.col);
-
-        self.col += offset;
-        self.offset = self.col;
-
-        if offset == count {
-            Ok(self)
-        } else {
-            Err(Partial { at: self, remaining: count - offset })
-        }
-    }
-
-    pub fn at_right(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_at_right(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Moves a `Cursor` backwards inside a line by up to the specified amount.
-    pub fn try_at_left(mut self, count: usize, _: &impl BufferView) -> Result<Self, Partial> {
-        let offset = count.min(self.col);
-
-        self.col -= offset;
-        self.offset = self.col;
-
-        if offset == count {
-            Ok(self)
-        } else {
-            Err(Partial { at: self, remaining: count - offset })
-        }
-    }
-
-    pub fn at_left(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_at_left(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Moves a `Cursor` downwards by up to the specified amount.
-    pub fn try_below(mut self, count: usize, buffer: &impl BufferView) -> Result<Self, Partial> {
-        let offset = count.min(buffer.rows().saturating_sub(1) - self.row);
-
-        self.row += offset;
-        self.col = self.offset.min(buffer.cols_at(self.row));
-
-        if offset == count {
-            Ok(self)
-        } else {
-            Err(Partial { at: self, remaining: count - offset })
-        }
-    }
-
-    pub fn below(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_below(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Moves a `Cursor` upwards by up to the specified amount.
-    pub fn try_above(mut self, count: usize, buffer: &impl BufferView) -> Result<Self, Partial> {
-        let offset = count.min(self.row);
-
-        self.row -= offset;
-        self.col = self.offset.min(buffer.cols_at(self.row));
-
-        if offset == count {
-            Ok(self)
-        } else {
-            Err(Partial { at: self, remaining: count - offset })
-        }
-    }
-
-    pub fn above(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_above(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Advances a cursor while a predicate matches.
-    pub fn try_forward_while<P>(
-        self,
-        buffer: &impl BufferView,
-        predicate: P,
-    ) -> Result<Self, Partial>
-    where
-        P: Fn(Self) -> Option<bool>,
-    {
-        match predicate(self) {
-            Some(true) => self.try_forward(1, buffer)?.try_forward_while(buffer, predicate),
-            Some(false) => Ok(self),
-
-            None => Err(Partial { at: self, remaining: 1 }),
-        }
-    }
-
-    pub fn forward_while<P>(self, buffer: &impl BufferView, predicate: P) -> Self
-    where
-        P: Fn(Self) -> Option<bool>,
-    {
-        self.try_forward_while(buffer, predicate).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Advances a cursor while a predicate matches.
-    pub fn try_backward_while<P>(
-        self,
-        buffer: &impl BufferView,
-        predicate: P,
-    ) -> Result<Self, Partial>
-    where
-        P: Fn(Self) -> Option<bool>,
-    {
-        match predicate(self) {
-            Some(true) => self.try_backward(1, buffer)?.try_backward_while(buffer, predicate),
-            Some(false) => Ok(self),
-
-            None => Err(Partial { at: self, remaining: 1 }),
-        }
-    }
-
-    pub fn backward_while<P>(self, buffer: &impl BufferView, predicate: P) -> Self
-    where
-        P: Fn(Self) -> Option<bool>,
-    {
-        self.try_backward_while(buffer, predicate).unwrap_or_else(|partial| partial.at)
-    }
-
-    // TODO: Instead of having methods for moving inside lines (`at_left`, `at_right`), across
-    // lines (`above`, `below`) and freely (`forward`, `backward`) as `Cursor` members, do
-    // something similar to what `xi_rope` [1][2] does:
-    //
-    // ```
-    // pub trait Metric {
-    //  fn next(cursor: Cursor, count: usize, buffer: &impl BufferView) -> Result<Cursor, Partial>;
-    //  fn prev(cursor: Cursor, count: usize, buffer: &impl BufferView) -> Result<Cursor, Partial>;
-    // }
-    //
-    // struct Characters;
-    // struct Lines;
-    // struct Words;
-    // struct Paragraphs;
-    //
-    // impl Cursor {
-    //     fn try_forward<M: Metric>(self, count: usize, buffer: &impl BufferView) -> Result<Cursor, Partial> {
-    //       M::forward(self, count, usize, buffer)
-    //     }
-    //
-    //     fn forward<M: Metric>(self, count: usize, buffer: &impl BufferView) -> Cursor {
-    //       M::forward(self, count, buffer).unwrap_or_else(|Partial { at, .. }| at)
-    //     }
-    //
-    //     [...]
-    // }
-    // ```
-    //
-    // And maybe even do something like:
-    //
-    // ```
-    // fn iter<M: Metric>(self, buffer: &impl BufferView) -> impl Iterator<Item = BufferView> {
-    //   [...]
-    // }
-    // ```
-    //
-    // Then, `forward(n, buf)` would become `forward::<Characters>(n, buf)`, `at_left(n, buf)`
-    // would become `forward::<Characters>(n, buf.line(row))` or something, etc.
-    //
-    // That'd make easier to extend with new metrics (i.e., text objects) without doing all
-    // boilerplate inside of `Cursor`.
-    //
-    // We could also have `Metric` be a regular parameter in order to hold state to make defining
-    // metrics from Lua easier.
-    //
-    // [1]: https://docs.rs/xi-rope/0.3.0/xi_rope/tree/struct.Cursor.html
-    // [2]: https://docs.rs/xi-rope/0.3.0/xi_rope/tree/trait.Metric.html
-
-    /// Moves a `Cursor` forward.
-    pub fn try_forward(self, count: usize, buffer: &impl BufferView) -> Result<Self, Partial> {
-        if count == 0 {
-            Ok(self)
-        } else {
-            self.try_at_right(count, buffer).or_else(|Partial { at, remaining }| {
-                at.try_below(1, buffer)
-                    .or(Err(Partial { at, remaining }))?
-                    .at_bol(buffer)
-                    .try_forward(remaining - 1, buffer)
-            })
-        }
-    }
-
-    pub fn forward(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_forward(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    /// Moves a `Cursor` backwards.
-    pub fn try_backward(self, count: usize, buffer: &impl BufferView) -> Result<Self, Partial> {
-        if count == 0 {
-            Ok(self)
-        } else {
-            self.try_at_left(count, buffer).or_else(|Partial { at, remaining }| {
-                at.try_above(1, buffer)
-                    .or(Err(Partial { at, remaining }))?
-                    .at_eol(buffer)
-                    .try_backward(remaining - 1, buffer)
-            })
-        }
-    }
-
-    pub fn backward(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_backward(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    pub fn try_forward_words(
-        self,
-        count: usize,
-        buffer: &impl BufferView,
-    ) -> Result<Self, Partial> {
-        (1..=count).try_fold(self, |cursor, _| {
-            cursor
-                .try_forward_while(buffer, |p| Some(!buffer.get(p)?.is_whitespace()))?
-                .try_forward_while(buffer, |p| Some(buffer.get(p)?.is_whitespace()))
-        })
-    }
-
-    pub fn forward_words(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_forward_words(count, buffer).unwrap_or_else(|partial| partial.at)
-    }
-
-    pub fn try_backward_words(
-        self,
-        count: usize,
-        buffer: &impl BufferView,
-    ) -> Result<Self, Partial> {
-        (1..=count).try_fold(self, |cursor, _| {
-            cursor
-                .try_backward(1, buffer)?
-                .try_backward_while(buffer, |p| Some(buffer.get(p)?.is_whitespace()))?
-                .try_backward_while(buffer, |p| Some(!buffer.get(p)?.is_whitespace()))?
-                .try_forward(1, buffer)
-        })
-    }
-
-    pub fn backward_words(self, count: usize, buffer: &impl BufferView) -> Self {
-        self.try_backward_words(count, buffer).unwrap_or_else(|partial| partial.at)
+    /// Iterates through each cursor position as specified by a metric.
+    pub fn iter<B: BufferView, M: Metric>(self, buffer: &B) -> CursorIterator<'_, B, M> {
+        CursorIterator::new(self, buffer)
     }
 }
 
-impl Error for Partial {}
+#[derive(Clone)]
+pub struct CursorIterator<'a, B: BufferView, M: Metric> {
+    anchor: Cursor,
+    buffer: &'a B,
 
-impl std::fmt::Display for Partial {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Attempt to move {} units past the allowed bounds", self.remaining)
+    metric: PhantomData<&'a M>,
+}
+
+impl<'a, M: Metric, B: BufferView> CursorIterator<'a, B, M> {
+    pub fn new(anchor: Cursor, buffer: &'a B) -> Self {
+        Self { anchor, buffer, metric: PhantomData::default() }
+    }
+}
+
+pub struct Bounded;
+
+impl Metric for Bounded {}
+
+impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Bounded> {
+    type Item = Cursor;
+
+    /// Moves a `Cursor` forwards inside a line by up to the specified amount.
+    fn next(&mut self) -> Option<Self::Item> {
+        let col = self.anchor.col();
+        let row = self.anchor.row();
+
+        self.anchor =
+            if col < self.buffer.cols_at(row) { Some(Cursor::new(col + 1, row)) } else { None }?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Bounded> {
+    /// Moves a `Cursor` forwards inside a line by up to the specified amount.
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let col = self.anchor.col();
+        let row = self.anchor.row();
+
+        self.anchor = if col > 0 { Some(Cursor::new(col - 1, row)) } else { None }?;
+
+        Some(self.anchor)
+    }
+}
+
+pub struct Unbounded;
+impl Metric for Unbounded {}
+
+impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Unbounded> {
+    type Item = Cursor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let col = self.anchor.col();
+        let row = self.anchor.row();
+
+        self.anchor = if col == self.buffer.cols_at(row) {
+            if row + 1 < self.buffer.rows() {
+                Some(Cursor::new(0, row + 1))
+            } else {
+                None
+            }
+        } else {
+            Some(Cursor::new(col + 1, row))
+        }?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Unbounded> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let col = self.anchor.col();
+        let row = self.anchor.row();
+
+        self.anchor = if col == 0 {
+            if row > 0 {
+                Some(Cursor::new(0, row - 1))
+            } else {
+                None
+            }
+        } else {
+            Some(Cursor::new(col - 1, row))
+        }?;
+
+        Some(self.anchor)
+    }
+}
+
+pub struct Line;
+impl Metric for Line {}
+
+impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Line> {
+    type Item = Cursor;
+
+    /// Moves a `Cursor` downward.
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.anchor.row();
+
+        self.anchor = if row + 1 < self.buffer.rows() {
+            Some(Cursor {
+                row: row + 1,
+                col: self.anchor.offset.min(self.buffer.cols_at(row + 1)),
+                offset: self.anchor.offset,
+            })
+        } else {
+            None
+        }?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Line> {
+    /// Moves a `Cursor` upward.
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let row = self.anchor.row();
+
+        self.anchor = if row > 0 {
+            Some(Cursor {
+                row: row - 1,
+                col: self.anchor.offset.min(self.buffer.cols_at(row - 1)),
+                offset: self.anchor.offset,
+            })
+        } else {
+            None
+        }?;
+
+        Some(self.anchor)
+    }
+}
+
+pub struct Word;
+impl Metric for Word {}
+
+impl<'a, B: BufferView> CursorIterator<'a, B, Word> {
+    fn has_whitespace(&self, p: &Cursor) -> Option<bool> {
+        self.buffer.get(p).map(char::is_whitespace)
+    }
+
+    fn has_character(&self, p: &Cursor) -> Option<bool> {
+        self.has_whitespace(p).map(bool::not)
+    }
+}
+
+impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Word> {
+    type Item = Cursor;
+
+    /// Moves forward by a word unit.
+    fn next(&mut self) -> Option<Self::Item> {
+        // NOTE: This is more like a hack than the proper behaviour; ideally, we'd search for a
+        // pair that matches `has_whitespace` into `has_character` in order to be consistent with
+        // the `SemanticWord` and `Paragraph` implementations.
+        self.anchor = self
+            .anchor
+            .iter::<_, Unbounded>(self.buffer)
+            .skip_while(|p| self.has_character(p).unwrap_or(false))
+            .find(|p| self.has_character(p).unwrap_or(true))?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Word> {
+    /// Moves backward by a word unit.
+    fn next_back(&mut self) -> Option<Self::Item> {
+        // NOTE: In order to match Vim's behaviour, we want either:
+        //  (1) A whitespace (at `previous`) followed by a character (at `current`).
+        //  (2) The beginning of the buffer (`previous` is `None`) followed by anything.
+
+        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).rev().find(|current| {
+            match current.iter::<_, Unbounded>(self.buffer).next_back() {
+                Some(ref previous) => {
+                    self.has_whitespace(previous).expect("has_whitespace")
+                        && self.has_character(current).expect("has_character")
+                },
+
+                // We have (2).
+                None => true,
+            }
+        })?;
+
+        Some(self.anchor)
+    }
+}
+
+pub struct Paragraph;
+impl Metric for Paragraph {}
+
+impl<'a, B: BufferView> CursorIterator<'a, B, Paragraph> {
+    fn has_line_break(&self, p: &Cursor) -> Option<bool> {
+        self.buffer.get(p).map(|ch| ch == '\n')
+    }
+}
+
+impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Paragraph> {
+    type Item = Cursor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).find(|p| {
+            match p.iter::<_, Unbounded>(self.buffer).next_back() {
+                Some(ref q) => {
+                    self.has_line_break(p).map(bool::not).unwrap_or(false)
+                        && self.has_line_break(q).unwrap_or(false)
+                },
+                None => false,
+            }
+        })?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Paragraph> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).rev().find(|p| {
+            match p.iter::<_, Unbounded>(self.buffer).next_back() {
+                Some(ref q) => {
+                    self.has_line_break(p).map(bool::not).unwrap_or(false)
+                        && self.has_line_break(q).unwrap_or(false)
+                },
+                None => false,
+            }
+        })?;
+
+        Some(self.anchor)
     }
 }
