@@ -97,20 +97,30 @@ pub type Range = (Cursor, Cursor);
 #[derive(Clone, Debug)]
 pub enum Mode {
     /// The default editor mode.
-    Normal { count: Option<usize> },
+    Normal {
+        /// The number of times to repeat the next operation.
+        repeat: Option<usize>,
+    },
 
-    /// Text input mode.
+    /// The text input mode.
     Edit,
 
     /// Queries the user for a text range.
-    Select { anchor: Cursor, count: Option<usize> },
+    Select {
+        /// The fixed point of the selection.
+        anchor: Cursor,
+
+        /// The number of times to repeat the next operation.
+        repeat: Option<usize>,
+    },
 
     /// Queries the user for a text object and applies an operation.
     Operator {
+        /// The prompt displayed to the user.
         prompt: String,
 
-        ///  fcar
-        count: Option<usize>,
+        /// The number of times to repeat the provided text object.
+        repeat: Option<usize>,
 
         /// Callback invoked once a text object has been provided.
         callback: Arc<dyn Callback<Range>>,
@@ -118,10 +128,10 @@ pub enum Mode {
 
     /// Queries the user for a text input and applies an operation.
     Query {
+        /// The prompt displayed to the user.
         prompt: String,
 
-        /// Length of the query before the callback is invoked. If `None`,
-        /// invokes on `Return`.
+        /// The maximum length of the queried string.
         length: Option<usize>,
 
         /// Partial buffer for the query.
@@ -143,8 +153,8 @@ impl<'a, B: 'a + BufferView> UserData for CursorIterator<'a, B, Unbounded> {
 
 impl UserData for Cursor {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
-        methods.add_method("forward", |_, &cursor, (count, buffer): (usize, &Buf)| {
-            Ok(cursor.iter::<_, Unbounded>(buffer).take(count).last().unwrap_or(cursor))
+        methods.add_method("forward", |_, &cursor, (repeat, buffer): (usize, &Buf)| {
+            Ok(cursor.iter::<_, Unbounded>(buffer).take(repeat).last().unwrap_or(cursor))
         })
     }
 }
@@ -229,18 +239,18 @@ impl State {
 
 impl Default for Mode {
     fn default() -> Self {
-        Self::Normal { count: None }
+        Self::Normal { repeat: None }
     }
 }
 
 impl Mode {
     pub fn with_count(mut self, next: Option<usize>) -> Self {
         match self {
-            Mode::Operator { ref mut count, .. }
-            | Mode::Normal { ref mut count, .. }
-            | Mode::Select { ref mut count, .. } => *count = next,
+            Mode::Operator { ref mut repeat, .. }
+            | Mode::Normal { ref mut repeat, .. }
+            | Mode::Select { ref mut repeat, .. } => *repeat = next,
 
-            _ => panic!("Attempt to set count for an incompatible mode"),
+            _ => panic!("Attempt to set repeat for an incompatible mode"),
         };
 
         self
@@ -255,16 +265,16 @@ impl Mode {
         self
     }
 
-    pub fn normal(count: Option<usize>) -> Self {
-        Self::Normal { count }
+    pub fn normal(repeat: Option<usize>) -> Self {
+        Self::Normal { repeat }
     }
 
     pub fn operator(
         prompt: impl Into<String>,
-        count: Option<usize>,
+        repeat: Option<usize>,
         callback: impl Callback<Range>,
     ) -> Self {
-        Self::Operator { prompt: prompt.into(), count, callback: Arc::new(callback) }
+        Self::Operator { repeat, prompt: prompt.into(), callback: Arc::new(callback) }
     }
 
     pub fn query(
@@ -273,19 +283,15 @@ impl Mode {
         callback: impl for<'r> Callback<&'r str>,
     ) -> Self {
         Self::Query {
+            length,
             prompt: prompt.into(),
             partial: EditView::default(),
-            length,
             callback: Arc::new(callback),
         }
     }
 }
 
-pub fn event_loop(
-    state: &mut State,
-    lua: &mut Lua,
-    event: termion::event::Key,
-) -> Result<(), Box<dyn Error>> {
+pub fn event_loop(state: &mut State, lua: &mut Lua, event: Key) -> Result<(), Box<dyn Error>> {
     use termion::event::Key::{Backspace, Char, Ctrl, Delete, Esc};
     use Mode::{Edit, Normal, Operator, Query, Select};
 
@@ -300,7 +306,7 @@ pub fn event_loop(
 
         (Normal { .. }, Char('v')) => {
             let anchor = state.cursor();
-            state.with_mode(|_| Select { anchor, count: None });
+            state.with_mode(|_| Select { anchor, repeat: None });
         },
 
         (Normal { .. }, Char('i')) => state.with_mode(|_| Edit),
@@ -376,11 +382,11 @@ pub fn event_loop(
             state.with_mode(|_| Mode::operator("Surround", None, surround));
         },
 
-        (Normal { count }, Char('d')) => {
+        (Normal { repeat }, Char('d')) => {
             state.with_mode(|_| {
                 Mode::operator(
                     "Delete",
-                    count,
+                    repeat,
                     |state: &mut State, _lua: &mut Lua, (start, end): Range| {
                         state.with_cursor(|_, _| start);
                         state.delete(start..=end);
@@ -437,15 +443,15 @@ pub fn event_loop(
             )
         }),
 
-        (Normal { count }, Char('t')) => state.with_mode(|_| {
+        (Normal { repeat }, Char('t')) => state.with_mode(|_| {
             Mode::query("Jump to next", Some(1), move |state: &mut State, _: &mut Lua, ch: &str| {
                 let ch = ch.chars().next().expect("ch");
 
                 state.try_with_cursor(|cur, buf| {
-                    let count = count.unwrap_or(1);
+                    let repeat = repeat.unwrap_or(1);
 
                     let mut it = cur.iter::<_, Bounded>(buf);
-                    (1..=count).fold(None, |_, _| {
+                    (1..=repeat).fold(None, |_, _| {
                         it.find(|p| {
                             p.iter::<_, Bounded>(buf)
                                 .next()
@@ -455,26 +461,29 @@ pub fn event_loop(
                     })
                 });
 
-                state.with_mode(|_| Normal { count: None });
+                state.with_mode(|_| Normal { repeat: None });
 
                 Ok(())
             })
         }),
 
-        (Operator { ref callback, count, .. }, Char('W')) => {
+        (Operator { ref callback, repeat, .. }, Char('W')) => {
             let start = state.cursor();
-            let end =
-                start.iter::<_, Word>(state.buffer()).take(count.unwrap_or(1)).last().expect("end");
+            let end = start
+                .iter::<_, Word>(state.buffer())
+                .take(repeat.unwrap_or(1))
+                .last()
+                .expect("end");
 
             callback(state, lua, (start, end))?;
         },
 
-        (Operator { callback, count, .. }, Char('B')) => {
+        (Operator { callback, repeat, .. }, Char('B')) => {
             let end = state.cursor();
             let start = end
                 .iter::<_, Word>(state.buffer())
                 .rev()
-                .take(count.unwrap_or(1))
+                .take(repeat.unwrap_or(1))
                 .last()
                 .expect("start");
 
@@ -488,16 +497,18 @@ pub fn event_loop(
             partial.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next());
 
             match length {
-                None if ch == '\n' => callback(state, lua, partial.buffer().as_str()),
+                _ if ch == '\n' => {
+                    callback(state, lua, partial.buffer().as_str())?;
+                },
+
                 Some(length) if length == partial.buffer().len() => {
-                    callback(state, lua, partial.buffer().as_str())
+                    callback(state, lua, partial.buffer().as_str())?;
                 },
 
                 _ => {
                     state.with_mode(|mode| mode.with_partial(|p| *p = partial));
-                    Ok(())
                 },
-            }?;
+            };
         },
 
         (Query { .. }, Backspace) => {
@@ -541,71 +552,71 @@ pub fn event_loop(
             state.delete(state.cursor()..anchor);
         },
 
-        (Normal { count, .. }, Char('W')) => {
+        (Normal { repeat, .. }, Char('W')) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor(|cur, buffer| {
-                cur.iter::<_, Word>(buffer).take(count.unwrap_or(1)).last()
+                cur.iter::<_, Word>(buffer).take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('B')) => {
+        (Normal { repeat, .. }, Char('B')) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor({
-                |cur, buffer| cur.iter::<_, Word>(buffer).rev().take(count.unwrap_or(1)).last()
+                |cur, buffer| cur.iter::<_, Word>(buffer).rev().take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('h'))
-        | (Select { count, .. }, Char('h'))
-        | (Normal { count, .. }, Key::Left)
-        | (Select { count, .. }, Key::Left) => {
+        (Normal { repeat, .. }, Char('h'))
+        | (Select { repeat, .. }, Char('h'))
+        | (Normal { repeat, .. }, Key::Left)
+        | (Select { repeat, .. }, Key::Left) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor({
-                |cur, buffer| cur.iter::<_, Bounded>(buffer).rev().take(count.unwrap_or(1)).last()
+                |cur, buffer| cur.iter::<_, Bounded>(buffer).rev().take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('j'))
-        | (Select { count, .. }, Char('j'))
-        | (Normal { count, .. }, Key::Down)
-        | (Select { count, .. }, Key::Down) => {
+        (Normal { repeat, .. }, Char('j'))
+        | (Select { repeat, .. }, Char('j'))
+        | (Normal { repeat, .. }, Key::Down)
+        | (Select { repeat, .. }, Key::Down) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor({
-                |cur, buffer| cur.iter::<_, Line>(buffer).take(count.unwrap_or(1)).last()
+                |cur, buffer| cur.iter::<_, Line>(buffer).take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('k'))
-        | (Select { count, .. }, Char('k'))
-        | (Normal { count, .. }, Key::Up)
-        | (Select { count, .. }, Key::Up) => {
+        (Normal { repeat, .. }, Char('k'))
+        | (Select { repeat, .. }, Char('k'))
+        | (Normal { repeat, .. }, Key::Up)
+        | (Select { repeat, .. }, Key::Up) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor(|cur, buffer| {
-                cur.iter::<_, Line>(buffer).rev().take(count.unwrap_or(1)).last()
+                cur.iter::<_, Line>(buffer).rev().take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('l'))
-        | (Select { count, .. }, Char('l'))
-        | (Normal { count, .. }, Key::Right)
-        | (Select { count, .. }, Key::Right) => {
+        (Normal { repeat, .. }, Char('l'))
+        | (Select { repeat, .. }, Char('l'))
+        | (Normal { repeat, .. }, Key::Right)
+        | (Select { repeat, .. }, Key::Right) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor({
-                |cur, buffer| cur.iter::<_, Bounded>(buffer).take(count.unwrap_or(1)).last()
+                |cur, buffer| cur.iter::<_, Bounded>(buffer).take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('{')) | (Select { count, .. }, Char('{')) => {
+        (Normal { repeat, .. }, Char('{')) | (Select { repeat, .. }, Char('{')) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor(|cur, buffer| {
-                cur.iter::<_, Paragraph>(buffer).rev().take(count.unwrap_or(1)).last()
+                cur.iter::<_, Paragraph>(buffer).rev().take(repeat.unwrap_or(1)).last()
             });
         },
 
-        (Normal { count, .. }, Char('}')) | (Select { count, .. }, Char('}')) => {
+        (Normal { repeat, .. }, Char('}')) | (Select { repeat, .. }, Char('}')) => {
             state.with_mode(|mode| mode.with_count(None));
             state.try_with_cursor({
-                |cur, buffer| cur.iter::<_, Paragraph>(buffer).take(count.unwrap_or(1)).last()
+                |cur, buffer| cur.iter::<_, Paragraph>(buffer).take(repeat.unwrap_or(1)).last()
             });
         },
 
@@ -623,11 +634,11 @@ pub fn event_loop(
             state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next_back())
         },
 
-        (Normal { count }, Char(ch @ '0'..='9'))
-        | (Select { count, .. }, Char(ch @ '0'..='9'))
-        | (Operator { count, .. }, Char(ch @ '0'..='9')) => {
+        (Normal { repeat }, Char(ch @ '0'..='9'))
+        | (Select { repeat, .. }, Char(ch @ '0'..='9'))
+        | (Operator { repeat, .. }, Char(ch @ '0'..='9')) => {
             let delta = ch.to_digit(10).unwrap() as usize;
-            let n = count.or(Some(0)).map(|count| count * 10 + delta);
+            let n = repeat.or(Some(0)).map(|repeat| repeat * 10 + delta);
 
             state.with_mode(|mode| mode.with_count(n))
         },
