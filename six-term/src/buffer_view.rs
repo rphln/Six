@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::marker::PhantomData;
 
 use tui::{
@@ -9,27 +8,24 @@ use tui::{
     Frame,
 };
 
-use six::buffer::View;
-use six::Cursor;
-
-pub struct Col(pub u16);
-pub struct Row(pub u16);
-
 pub struct TextEditState<'a> {
-    buf: &'a str,
+    /// The text content of the editor view.
+    content: &'a str,
 
+    /// The column of the editor view's cursor.
     col: u16,
+
+    /// The row of the editor view's cursor.
     row: u16,
 }
 
 impl<'a> TextEditState<'a> {
-    pub fn new(buffer: &'a impl View, cursor: Cursor) -> Self {
-        let buf = buffer.as_str();
-
-        let row = cursor.row() as u16;
+    /// Initializes the editor view state from a string and a cursor.
+    pub fn new(content: &'a str, cursor: six::Cursor) -> Self {
         let col = cursor.col() as u16;
+        let row = cursor.row() as u16;
 
-        Self { buf, row, col }
+        Self { content, col, row }
     }
 }
 
@@ -41,12 +37,12 @@ pub enum Overflow {
 pub struct TextEditView<'a> {
     overflow: Overflow,
 
-    _phantom: PhantomData<&'a ()>,
+    phantom: PhantomData<&'a ()>,
 }
 
-impl<'a> TextEditView<'a> {
+impl TextEditView<'_> {
     pub fn new(overflow: Overflow) -> Self {
-        Self { overflow, _phantom: PhantomData::default() }
+        Self { overflow, phantom: PhantomData::default() }
     }
 
     pub fn scroll(&self, area: Rect, state: &TextEditState) -> (u16, u16) {
@@ -68,7 +64,7 @@ impl<'a> StatefulWidget for TextEditView<'a> {
     type State = TextEditState<'a>;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let paragraph = Paragraph::new(state.buf);
+        let paragraph = Paragraph::new(state.content);
         let paragraph = match self.overflow {
             Overflow::Wrap => paragraph.wrap(Wrap { trim: false }),
             Overflow::Scroll => paragraph.scroll(self.scroll(area, state)),

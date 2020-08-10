@@ -18,7 +18,6 @@ use tui::{
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
 use six::{
-    buffer::View,
     state::{handle_key, Action, Editor, Mode, TextObject},
     Lua,
 };
@@ -36,7 +35,7 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) 
     let ruler = area[0];
     let body = area[1];
 
-    let mut stat = TextEditState::new(state.content(), state.cursor());
+    let mut stat = TextEditState::new(state.content().as_str(), state.cursor());
     let view = TextEditView::new(Overflow::Scroll);
 
     let (y, _) = view.scroll(body, &stat);
@@ -105,7 +104,7 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(position, chunks[2]);
 
     if let Mode::Query { content, cursor, .. } = state.mode() {
-        let mut stat = TextEditState::new(content, *cursor);
+        let mut stat = TextEditState::new(content.as_str(), *cursor);
         let view = TextEditView::new(Overflow::Scroll);
 
         view.focus(chunks[1], frame, &stat);
@@ -160,7 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         draw(&mut terminal, &state)?;
 
         if let Some(key) = io::stdin().keys().next() {
-            use termion::event::Key::{Char, Ctrl, Esc};
+            use termion::event::Key::{Char, Ctrl, Down, Esc, Left, Right, Up};
             use Mode::{Edit, Normal, Query};
 
             let key = key?;
@@ -186,6 +185,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (_, Char('0')) => Action::TextObject(TextObject::Bol),
                 (_, Char('W')) => Action::TextObject(TextObject::Word),
                 (_, Char('E')) => Action::TextObject(TextObject::Eow),
+
+                (_, Up) => Action::TextObject(TextObject::Up),
+                (_, Down) => Action::TextObject(TextObject::Down),
+                (_, Left) => Action::TextObject(TextObject::Left),
+                (_, Right) => Action::TextObject(TextObject::Right),
 
                 _ => todo!(),
             };

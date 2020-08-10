@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use rlua::{Context, Lua, UserData, UserDataMethods};
 
-use crate::buffer::{Buffer, View};
-use crate::cursor::{Bounded, Char, Cursor, EndOfWord, Line, Points, Word};
+use crate::buffer::Buffer;
+use crate::cursor::{Bounded, Cursor, EndOfWord, Iter, Line, Word};
 
 // TODO: Replace with a trait alias once it stabilizes.
 pub trait Callback<Arg>:
-    Fn(&mut Editor, Arg) -> Result<(), Box<dyn Error>> + Send + Sync + 'static
+    Fn(&mut Editor, &mut Lua, Arg) -> Result<(), Box<dyn Error>> + Send + Sync + 'static
 {
 }
 
@@ -75,7 +75,7 @@ impl Editor {
     /// Returns a view to the text buffer.
     #[inline]
     #[must_use]
-    pub fn content(&self) -> &impl View {
+    pub fn content(&self) -> &Buffer {
         // TODO: Return a reference.
         &self.content
     }
@@ -154,9 +154,9 @@ impl Editor {
     /// # Errors
     ///
     /// Forwards any errors from the callback.
-    pub fn after_query(&mut self, text: &str) -> Result<(), Box<dyn Error>> {
+    pub fn after_query(&mut self, lua: &mut Lua, text: &str) -> Result<(), Box<dyn Error>> {
         if let Mode::Query { ref callback, .. } = self.mode {
-            callback.clone()(self, text)
+            callback.clone()(self, lua, text)
         } else {
             panic!("Attempt to call `after_query` in an incompatible mode.")
         }
@@ -177,9 +177,14 @@ impl Editor {
     /// # Errors
     ///
     /// Forwards any errors from the callback.
-    pub fn after_operator(&mut self, p: Cursor, q: Cursor) -> Result<(), Box<dyn Error>> {
+    pub fn after_operator(
+        &mut self,
+        lua: &mut Lua,
+        start: Cursor,
+        end: Cursor,
+    ) -> Result<(), Box<dyn Error>> {
         if let Mode::Operator { ref callback, .. } = self.mode {
-            callback.clone()(self, (p, q))
+            callback.clone()(self, lua, (start, end))
         } else {
             panic!("Attempt to call `after_operator` in an incompatible mode.")
         }
@@ -193,45 +198,112 @@ impl Editor {
     /// Moves the cursor forward up to the specified units according to the specified unit.
     pub fn forward<'a, M>(&'a mut self, n: usize)
     where
-        Points<'a, Buffer, M>: Iterator<Item = Cursor>,
+        Iter<'a, M>: Iterator<Item = Cursor>,
     {
-        self.cursor = self.cursor.iter::<_, M>(&self.content).take(n).last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.content)
+            .take(n)
+            .last()
+            .or_else(|| {
+                // FIXME: This is, of course, horribly inefficient.
+                // Also, we probably should accept this lambda as an argument instead.
+                self.cursor.iter::<char>(&self.content).last()
+            })
+            .unwrap_or(self.cursor);
     }
 
     /// Moves the cursor forward the last position according to the specified unit.
     pub fn last<'a, M>(&'a mut self)
     where
-        Points<'a, Buffer, M>: Iterator<Item = Cursor>,
+        Iter<'a, M>: Iterator<Item = Cursor>,
     {
-        self.cursor = self.cursor.iter::<_, M>(&self.content).last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.content)
+            .last()
+            .or_else(|| {
+                // FIXME: This is, of course, horribly inefficient.
+                // Also, we probably should accept this lambda as an argument instead.
+                self.cursor.iter::<char>(&self.content).last()
+            })
+            .unwrap_or(self.cursor);
     }
 
     /// Moves the cursor backward up to the specified units according to the specified unit.
     pub fn backward<'a, M>(&'a mut self, n: usize)
     where
-        Points<'a, Buffer, M>: DoubleEndedIterator<Item = Cursor>,
+        Iter<'a, M>: DoubleEndedIterator<Item = Cursor>,
     {
-        self.cursor =
-            self.cursor.iter::<_, M>(&self.content).rev().take(n).last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.content)
+            .rev()
+            .take(n)
+            .last()
+            .or_else(|| {
+                // FIXME: This is, of course, horribly inefficient.
+                // Also, we probably should accept this lambda as an argument instead.
+                self.cursor.iter::<char>(&self.content).rev().last()
+            })
+            .unwrap_or(self.cursor);
     }
 
     /// Moves the cursor backward the last position according to the specified unit.
     pub fn first<'a, M>(&'a mut self)
     where
-        Points<'a, Buffer, M>: DoubleEndedIterator<Item = Cursor>,
+        Iter<'a, M>: DoubleEndedIterator<Item = Cursor>,
     {
-        self.cursor = self.cursor.iter::<_, M>(&self.content).rev().last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.content)
+            .rev()
+            .last()
+            .or_else(|| {
+                // FIXME: This is, of course, horribly inefficient.
+                // Also, we probably should accept this lambda as an argument instead.
+                self.cursor.iter::<char>(&self.content).rev().last()
+            })
+            .unwrap_or(self.cursor);
     }
 
     /// Inserts a character at the specified position.
     pub fn insert(&mut self, at: Cursor, ch: char) {
-        self.content.insert(at, ch);
+        self.content.insert(at.to_offset(&self.content), ch);
     }
 
     /// Removes the specified range in the buffer, and replaces it with the given string.
     #[inline]
     pub fn replace_range(&mut self, range: impl RangeBounds<Cursor>, text: &str) {
-        self.content.edit(range, text);
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let start = match range.start_bound() {
+            Included(ref start) => Included(start.to_offset(&self.content)),
+            Excluded(ref start) => Excluded(start.to_offset(&self.content)),
+            Unbounded => Unbounded,
+        };
+
+        let end = match range.start_bound() {
+            Included(ref end) => Included(end.to_offset(&self.content)),
+            Excluded(ref end) => Excluded(end.to_offset(&self.content)),
+            Unbounded => Unbounded,
+        };
+
+        self.content.edit((start, end), text);
+    }
+
+    /// Executes a Lua program.
+    ///
+    /// # Errors
+    ///
+    /// Forwards any errors produced by the upstream.
+    pub fn exec(&mut self, lua: &mut Lua, program: &str) -> rlua::Result<()> {
+        lua.context(|context| {
+            context.scope(|scope| {
+                context.globals().set("state", scope.create_nonstatic_userdata(self)?)?;
+                context.load(program).exec()
+            })
+        })
     }
 
     /// Evaluates a Lua expression.
@@ -276,6 +348,11 @@ pub enum TextObject {
     Word,
     Bol,
     Eow,
+
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 /// Built-in editor actions.
@@ -310,6 +387,9 @@ pub enum Action {
     /// Queries the user to surround a text range.
     ToSurround,
 
+    /// Queries the user to surround a text range with a format string.
+    ToSandwich,
+
     /// Queries the user for an expression to evaluate.
     ToEval,
 
@@ -331,11 +411,12 @@ pub enum Action {
 }
 
 impl<F, Arg> Callback<Arg> for F where
-    F: Fn(&mut Editor, Arg) -> Result<(), Box<dyn Error>> + Send + Sync + 'static
+    F: Fn(&mut Editor, &mut Lua, Arg) -> Result<(), Box<dyn Error>> + Send + Sync + 'static
 {
 }
 
-pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(), Box<dyn Error>> {
+// TODO: Split this into a bunch of functions.
+pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(), Box<dyn Error>> {
     match action {
         Action::Escape { backward } => {
             state.escape();
@@ -353,23 +434,27 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
             }
         },
 
-        Action::ToEval {} => state.query("Eval", None, |state: &mut Editor, command: &str| {
-            state.escape();
-            Ok(())
-        }),
+        Action::ToEval {} => {
+            state.query("Exec", None, |state: &mut Editor, lua: &mut Lua, program: &str| {
+                state.escape();
+                state.exec(lua, program)?;
+
+                Ok(())
+            });
+        },
 
         Action::ToSurround { .. } => {
-            let surround = |state: &mut Editor, (start, end): (Cursor, Cursor)| {
-                // Replicates `vim-surround` by skipping any whitespaces at the end.
+            let surround = |state: &mut Editor, _: &mut Lua, (start, end): (Cursor, Cursor)| {
+                // Replicates `vim-surround` by skipping any spaces at the end.
                 let buf = state.content();
                 let end = end
-                    .iter::<_, EndOfWord>(buf)
+                    .iter::<EndOfWord>(buf)
                     .rev()
                     .next()
-                    .and_then(|end| end.iter::<_, Char>(buf).next())
+                    .and_then(|end| end.iter::<char>(buf).next())
                     .unwrap_or(end);
 
-                let surround = move |state: &mut Editor, sandwich: &str| {
+                let surround = move |state: &mut Editor, _: &mut Lua, sandwich: &str| {
                     let mut chars = sandwich.chars();
 
                     let prefix = chars.next().expect("prefix");
@@ -394,12 +479,12 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
 
         Action::Input(ch) => {
             if let Mode::Query { length, mut content, cursor, .. } = state.mode.clone() {
-                content.insert(cursor, ch);
+                content.insert(cursor.to_offset(&content), ch);
 
                 if ch == '\n' || length.map_or(false, |length| length == content.len()) {
-                    state.after_query(content.as_str())?;
+                    state.after_query(lua, content.as_str())?;
                 } else {
-                    let next_cursor = cursor.iter::<_, Char>(&content).next().expect("next");
+                    let next_cursor = cursor.iter::<char>(&content).next().expect("next");
                     let next_content = content;
 
                     if let Mode::Query { ref mut cursor, ref mut content, .. } = state.mode {
@@ -409,7 +494,7 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
                 }
             } else {
                 state.insert(state.cursor, ch);
-                state.forward::<Char>(1);
+                state.forward::<char>(1);
             }
         },
 
@@ -418,7 +503,7 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
             state.first::<Bounded>();
 
             if let Mode::Operator { .. } = state.mode {
-                state.after_operator(state.cursor(), end)?;
+                state.after_operator(lua, state.cursor(), end)?;
             }
         },
 
@@ -427,7 +512,7 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
             state.forward::<Word>(1);
 
             if let Mode::Operator { .. } = state.mode {
-                state.after_operator(start, state.cursor())?;
+                state.after_operator(lua, start, state.cursor())?;
             }
         },
 
@@ -436,7 +521,43 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
             state.forward::<EndOfWord>(1);
 
             if let Mode::Operator { .. } = state.mode {
-                state.after_operator(start, state.cursor())?;
+                state.after_operator(lua, start, state.cursor())?;
+            }
+        },
+
+        Action::TextObject(TextObject::Left) => {
+            let end = state.cursor();
+            state.backward::<Bounded>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, state.cursor(), end)?;
+            }
+        },
+
+        Action::TextObject(TextObject::Up) => {
+            let end = state.cursor();
+            state.backward::<Line>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, state.cursor(), end)?;
+            }
+        },
+
+        Action::TextObject(TextObject::Down) => {
+            let start = state.cursor();
+            state.forward::<Line>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, start, state.cursor())?;
+            }
+        },
+
+        Action::TextObject(TextObject::Right) => {
+            let start = state.cursor();
+            state.forward::<Bounded>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, start, state.cursor())?;
             }
         },
 
@@ -445,359 +566,3 @@ pub fn handle_key(state: &mut Editor, _: &mut Lua, action: Action) -> Result<(),
 
     Ok(())
 }
-// match (state.mode().clone(), event) {
-//     (Edit, Esc) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next_back());
-
-//         state.with_mode(|_| Mode::normal(None));
-//     },
-
-//     (_, Esc) => state.with_mode(|_| Mode::normal(None)),
-
-//     (Normal { .. }, Char('v')) => {
-//         let anchor = state.cursor();
-//         state.with_mode(|_| Select { anchor, repeat: None });
-//     },
-
-//     (Normal { .. }, Char('i')) => state.with_mode(|_| Edit),
-//     (Normal { .. }, Char('a')) => {
-//         state.with_mode(|_| Edit);
-//         state.try_with_cursor(|cursor, buffer| cursor.iter::<_, Bounded>(buffer).next())
-//     },
-
-//     (Normal { .. }, Char('I')) => {
-//         state.with_mode(|_| Edit);
-//         state.try_with_cursor(|cursor, buffer| cursor.iter::<_,
-// Bounded>(buffer).rev().last());     },
-//     (Normal { .. }, Char('A')) => {
-//         state.with_mode(|_| Edit);
-//         state.try_with_cursor(|cursor, buffer| cursor.iter::<_, Bounded>(buffer).last());
-//     },
-
-//     (Normal { .. }, Char('o')) => {
-//         let eol = state
-//             .cursor()
-//             .iter::<_, Bounded>(state.buffer())
-//             .last()
-//             .unwrap_or_else(|| state.cursor());
-//         state.insert(eol, '\n');
-
-//         state.try_with_cursor(|_, buffer| eol.iter::<_, Unbounded>(buffer).next());
-//         state.with_mode(|_| Mode::Edit);
-//     },
-
-//     (Normal { .. }, Char('O')) => {
-//         let bol = state
-//             .cursor()
-//             .iter::<_, Bounded>(state.buffer())
-//             .rev()
-//             .last()
-//             .unwrap_or_else(|| state.cursor());
-//         state.insert(bol, '\n');
-
-//         state.try_with_cursor(|_, buffer| bol.iter::<_, Unbounded>(buffer).next_back());
-//         state.with_mode(|_| Mode::Edit);
-//     },
-
-//     (Normal { .. }, Char('s')) => {
-//         let surround = |state: &mut State, _lua: &mut Lua, (start, end): Range| {
-//             // Replicates `vim-surround` by skipping any whitespaces at the end.
-//             let buf = state.buffer();
-//             let end = end
-//                 .iter::<_, Unbounded>(buf)
-//                 .rev()
-//                 .find(|p| buf.get(p).map(|ch| !ch.is_whitespace()).unwrap_or(true))
-//                 .unwrap_or(end);
-
-//             let surround = move |state: &mut State, _lua: &mut Lua, sandwich: &str| {
-//                 let mut chars = sandwich.chars();
-
-//                 let prefix = chars.next().expect("prefix");
-//                 let suffix = chars.next().expect("suffix");
-
-//                 state.insert(end, suffix);
-//                 state.insert(start, prefix);
-
-//                 state.with_mode(|_| Mode::default());
-//                 state.with_cursor(|_, _| start);
-
-//                 Ok(())
-//             };
-
-//             state.with_mode(|_| Mode::query("Surround with", Some(2), surround));
-
-//             Ok(())
-//         };
-
-//         state.with_mode(|_| Mode::operator("Surround", None, surround));
-//     },
-
-//     (Normal { repeat }, Char('d')) => {
-//         state.with_mode(|_| {
-//             Mode::operator(
-//                 "Delete",
-//                 repeat,
-//                 |state: &mut State, _lua: &mut Lua, (start, end): Range| {
-//                     state.with_cursor(|_, _| start);
-//                     state.delete(start..=end);
-//                     state.with_mode(|_| Mode::default());
-
-//                     Ok(())
-//                 },
-//             )
-//         });
-//     },
-
-//     (Normal { .. }, Char(';')) => {
-//         state.with_mode(|_| {
-//             Mode::query("Eval", None, |state: &mut State, lua: &mut Lua, program: &str| {
-//                 state.with_mode(|_| Mode::default());
-
-//                 lua.context(|ctx| {
-//                     ctx.scope(|scope| {
-//                         ctx.globals().set("state", scope.create_nonstatic_userdata(state)?)?;
-
-//                         ctx.load(program).exec()
-//                     })
-//                 })?;
-
-//                 Ok(())
-//             })
-//         });
-//     },
-
-//     (Normal { .. }, Char('u')) => state.with_mode(|_| {
-//         Mode::query(
-//             "Eval & Forward",
-//             None,
-//             |state: &mut State, lua: &mut Lua, program: &str| {
-//                 state.with_mode(|_| Mode::default());
-
-//                 state.try_with_cursor(|cursor, buffer| {
-//                     lua.context::<_, Option<Cursor>>(|ctx| {
-//                         ctx.scope(|scope| {
-//                             let iter = cursor.iter::<_, Unbounded>(buffer);
-//                             let iter = scope.create_nonstatic_userdata(iter);
-
-//                             ctx.load(program)
-//                                 .eval::<Function>()
-//                                 .unwrap()
-//                                 .call::<_, Option<Cursor>>(iter)
-//                                 .unwrap()
-//                         })
-//                     })
-//                 });
-
-//                 Ok(())
-//             },
-//         )
-//     }),
-
-//     (Normal { repeat }, Char('t')) => state.with_mode(|_| {
-//         Mode::query("Jump to next", Some(1), move |state: &mut State, _: &mut Lua, ch: &str|
-// {             let ch = ch.chars().next().expect("ch");
-
-//             state.try_with_cursor(|cur, buf| {
-//                 let repeat = repeat.unwrap_or(1);
-
-//                 let mut it = cur.iter::<_, Bounded>(buf);
-//                 (1..=repeat).fold(None, |_, _| {
-//                     it.find(|p| {
-//                         p.iter::<_, Bounded>(buf)
-//                             .next()
-//                             .map(|p| buf.get(p).map(|other| other == ch).expect("get"))
-//                             .unwrap_or(false)
-//                     })
-//                 })
-//             });
-
-//             state.with_mode(|_| Normal { repeat: None });
-
-//             Ok(())
-//         })
-//     }),
-
-//     (Operator { ref callback, repeat, .. }, Char('W')) => {
-//         let start = state.cursor();
-//         let end = start
-//             .iter::<_, Word>(state.buffer())
-//             .take(repeat.unwrap_or(1))
-//             .last()
-//             .expect("end");
-
-//         callback(state, lua, (start, end))?;
-//     },
-
-//     (Operator { callback, repeat, .. }, Char('B')) => {
-//         let end = state.cursor();
-//         let start = end
-//             .iter::<_, Word>(state.buffer())
-//             .rev()
-//             .take(repeat.unwrap_or(1))
-//             .last()
-//             .expect("start");
-
-//         callback(state, lua, (start, end))?;
-//     },
-
-//     (Query { mut partial, callback, length, .. }, Char(ch)) => {
-//         let at = partial.cursor();
-//         partial.buffer_mut().insert(at, ch);
-
-//         partial.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next());
-
-//         match length {
-//             _ if ch == '\n' => {
-//                 callback(state, lua, partial.buffer().as_str())?;
-//             },
-
-//             Some(length) if length == partial.buffer().len() => {
-//                 callback(state, lua, partial.buffer().as_str())?;
-//             },
-
-//             _ => {
-//                 state.with_mode(|mode| mode.with_partial(|p| *p = partial));
-//             },
-//         };
-//     },
-
-//     (Query { .. }, Backspace) => {
-//         state.with_mode(|mode| {
-//             mode.with_partial(|partial| {
-//                 partial.try_with_cursor(|cur, buf| cur.iter::<_,
-// Unbounded>(buf).next_back());
-
-//                 let cursor = partial.cursor();
-//                 if partial.buffer().get(cursor).is_some() {
-//                     partial.buffer_mut().delete(cursor..=cursor);
-//                 }
-//             })
-//         });
-//     },
-
-//     (Edit, Char(ch)) => {
-//         state.insert(state.cursor(), ch);
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next());
-//     },
-
-//     (Edit, Backspace) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Unbounded>(buffer).next_back());
-
-//         let cursor = state.cursor();
-//         if state.buffer().get(cursor).is_some() {
-//             state.delete(cursor..=cursor)
-//         }
-//     },
-
-//     (Edit, Delete) => {
-//         let cursor = state.cursor();
-//         if state.buffer().get(cursor).is_some() {
-//             state.delete(cursor..=cursor)
-//         }
-//     },
-
-//     (Edit, Ctrl('w')) => {
-//         let anchor = state.cursor();
-
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Word>(buffer).next_back());
-//         state.delete(state.cursor()..anchor);
-//     },
-
-//     (Normal { repeat, .. }, Char('W')) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor(|cur, buffer| {
-//             cur.iter::<_, Word>(buffer).take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('B')) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor({
-//             |cur, buffer| cur.iter::<_, Word>(buffer).rev().take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('h'))
-//     | (Select { repeat, .. }, Char('h'))
-//     | (Normal { repeat, .. }, Key::Left)
-//     | (Select { repeat, .. }, Key::Left) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor({
-//             |cur, buffer| cur.iter::<_,
-// Bounded>(buffer).rev().take(repeat.unwrap_or(1)).last()         });
-//     },
-
-//     (Normal { repeat, .. }, Char('j'))
-//     | (Select { repeat, .. }, Char('j'))
-//     | (Normal { repeat, .. }, Key::Down)
-//     | (Select { repeat, .. }, Key::Down) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor({
-//             |cur, buffer| cur.iter::<_, Line>(buffer).take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('k'))
-//     | (Select { repeat, .. }, Char('k'))
-//     | (Normal { repeat, .. }, Key::Up)
-//     | (Select { repeat, .. }, Key::Up) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor(|cur, buffer| {
-//             cur.iter::<_, Line>(buffer).rev().take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('l'))
-//     | (Select { repeat, .. }, Char('l'))
-//     | (Normal { repeat, .. }, Key::Right)
-//     | (Select { repeat, .. }, Key::Right) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor({
-//             |cur, buffer| cur.iter::<_, Bounded>(buffer).take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('{')) | (Select { repeat, .. }, Char('{')) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor(|cur, buffer| {
-//             cur.iter::<_, Paragraph>(buffer).rev().take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Normal { repeat, .. }, Char('}')) | (Select { repeat, .. }, Char('}')) => {
-//         state.with_mode(|mode| mode.with_count(None));
-//         state.try_with_cursor({
-//             |cur, buffer| cur.iter::<_, Paragraph>(buffer).take(repeat.unwrap_or(1)).last()
-//         });
-//     },
-
-//     (Edit { .. }, Key::Left) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next())
-//     },
-//     (Edit { .. }, Key::Up) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Line>(buffer).next_back())
-//     },
-
-//     (Edit { .. }, Key::Down) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Line>(buffer).next())
-//     },
-//     (Edit { .. }, Key::Right) => {
-//         state.try_with_cursor(|cur, buffer| cur.iter::<_, Bounded>(buffer).next_back())
-//     },
-
-//     (Normal { repeat }, Char(ch @ '0'..='9'))
-//     | (Select { repeat, .. }, Char(ch @ '0'..='9'))
-//     | (Operator { repeat, .. }, Char(ch @ '0'..='9')) => {
-//         let delta = ch.to_digit(10).unwrap() as usize;
-//         let n = repeat.or(Some(0)).map(|repeat| repeat * 10 + delta);
-
-//         state.with_mode(|mode| mode.with_count(n))
-//     },
-
-//     (Operator { .. }, _) => state.with_mode(|_| Mode::default()),
-
-//     _ => (),
-// };
-
-//     Ok(())
-// }
