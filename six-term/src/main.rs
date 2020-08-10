@@ -1,7 +1,9 @@
+//! Six - A Vi-like toy text editor.
+
+#![deny(clippy::all, clippy::pedantic)]
+
 use std::error::Error;
 use std::io;
-
-use rlua::Lua;
 
 use tui::{
     backend::{Backend, TermionBackend},
@@ -16,12 +18,16 @@ use tui::{
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
 use six::{
-    buffer::BufferView,
-    state::{event_loop, Mode, State},
-    ui::buffer_view::{Overflow, TextEditState, TextEditView},
+    buffer::View,
+    state::{handle_key, Action, Editor, Mode, TextObject},
+    Lua,
 };
 
-fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) {
+mod buffer_view;
+
+use crate::buffer_view::{Overflow, TextEditState, TextEditView};
+
+fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let area = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(vec![Constraint::Length(4), Constraint::Min(1)])
@@ -30,13 +36,13 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) {
     let ruler = area[0];
     let body = area[1];
 
-    let mut stat = TextEditState::from(state.editor());
+    let mut stat = TextEditState::new(state.content(), state.cursor());
     let view = TextEditView::new(Overflow::Scroll);
 
     let (y, _) = view.scroll(body, &stat);
 
     // TODO: Don't pointlessy render all markers.
-    let markers: Vec<_> = (1..=state.editor().buffer().rows())
+    let markers: Vec<_> = (1..=state.content().rows())
         .map(|n| {
             let style = if n == state.cursor().row() + 1 {
                 Style::default().fg(Color::Cyan)
@@ -58,7 +64,7 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) {
     frame.render_stateful_widget(view, body, &mut stat);
 }
 
-fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) {
+fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let debug = format!("{:#?}", state);
     let debug = Paragraph::new(debug.as_ref())
         .wrap(Wrap { trim: false })
@@ -67,13 +73,13 @@ fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) 
     frame.render_widget(debug, area);
 }
 
-fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State) {
+fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let mode = match state.mode() {
         Mode::Normal { .. } => "Normal",
         Mode::Edit { .. } => "Edit",
         Mode::Select { .. } => "Select",
-        Mode::Query { prompt, .. } => prompt.as_ref(),
-        Mode::Operator { prompt, .. } => prompt.as_ref(),
+        Mode::Query { prompt, .. } => prompt,
+        Mode::Operator { prompt, .. } => prompt,
     };
 
     let position = state.cursor().col().to_string();
@@ -98,8 +104,8 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State)
     frame.render_widget(mode, chunks[0]);
     frame.render_widget(position, chunks[2]);
 
-    if let Mode::Query { partial, .. } = state.mode() {
-        let mut stat = TextEditState::from(partial);
+    if let Mode::Query { content, cursor, .. } = state.mode() {
+        let mut stat = TextEditState::new(content, *cursor);
         let view = TextEditView::new(Overflow::Scroll);
 
         view.focus(chunks[1], frame, &stat);
@@ -107,7 +113,7 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &State)
     }
 }
 
-fn draw<B>(terminal: &mut Terminal<B>, state: &State) -> Result<(), Box<dyn Error>>
+fn draw<B>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Error>>
 where
     B: Backend + io::Write,
 {
@@ -147,20 +153,44 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = State::default();
+    let mut state = Editor::default();
     let mut lua = Lua::new();
 
     loop {
         draw(&mut terminal, &state)?;
 
         if let Some(key) = io::stdin().keys().next() {
+            use termion::event::Key::{Char, Ctrl, Esc};
+            use Mode::{Edit, Normal, Query};
+
             let key = key?;
 
-            if matches!(key, termion::event::Key::Ctrl('d')) {
+            if matches!(key, Ctrl('d')) {
                 break;
             }
 
-            event_loop(&mut state, &mut lua, key)?;
+            let action = match (state.mode(), key) {
+                (Edit { .. }, Char(ch)) => Action::Input(ch),
+                (Edit { .. }, Esc) => Action::Escape { backward: true },
+
+                (Query { .. }, Char(ch)) => Action::Input(ch),
+                (Query { .. }, Esc) => Action::Escape { backward: false },
+
+                (Normal { .. }, Char('i')) => Action::ToInsert { forward: false },
+                (Normal { .. }, Char('a')) => Action::ToInsert { forward: true },
+
+                (Normal { .. }, Char(';')) => Action::ToEval {},
+
+                (_, Char('s')) => Action::ToSurround {},
+
+                (_, Char('0')) => Action::TextObject(TextObject::Bol),
+                (_, Char('W')) => Action::TextObject(TextObject::Word),
+                (_, Char('E')) => Action::TextObject(TextObject::Eow),
+
+                _ => todo!(),
+            };
+
+            handle_key(&mut state, &mut lua, action)?;
         }
     }
 

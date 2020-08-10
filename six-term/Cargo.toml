@@ -1,0 +1,12 @@
+[package]
+name = "six-term"
+version = "0.1.0"
+authors = ["Raphael Nepomuceno <58113327+rphln@users.noreply.github.com>"]
+edition = "2018"
+license = "LGPL-3.0-or-later"
+
+[dependencies]
+six = { path = "../six" }
+
+tui = { git = "https://github.com/fdehau/tui-rs" }
+termion = "1.5"

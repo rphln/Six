@@ -1,0 +1,10 @@
+[package]
+name = "six"
+version = "0.1.0"
+authors = ["Raphael Nepomuceno <58113327+rphln@users.noreply.github.com>"]
+edition = "2018"
+license = "LGPL-3.0-or-later"
+
+[dependencies]
+rlua = "0.17.0"
+derivative = "2.1.1"

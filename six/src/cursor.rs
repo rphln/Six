@@ -1,61 +1,73 @@
 use std::marker::PhantomData;
 use std::ops::Not;
 
-use crate::buffer::BufferView;
-
-// TODO: Make this derivable.
-pub trait Metric {}
+use crate::buffer::View;
 
 /// A text buffer coordinate.
-#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, Copy, Default, Derivative)]
+#[derivative(PartialEq, PartialOrd, Eq, Ord)]
 pub struct Cursor {
+    /// The cursor row.
     row: usize,
+
+    /// The cursor column, limited to the current line length.
     col: usize,
 
+    /// The raw value of the cursor column.
+    #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
     offset: usize,
 }
 
 impl Cursor {
     /// Creates a new cursor at the specified coordinates.
+    #[must_use]
     pub fn new(col: usize, row: usize) -> Self {
         Self { row, col, offset: col }
     }
 
     /// Returns the horizontal position of this `Cursor`.
+    #[must_use]
     pub fn col(self) -> usize {
         self.col
     }
 
     /// Returns the vertical position of this `Cursor`.
+    #[must_use]
     pub fn row(self) -> usize {
         self.row
     }
 
-    /// Iterates through each cursor position as specified by a metric.
-    pub fn iter<B: BufferView, M: Metric>(self, buffer: &B) -> CursorIterator<'_, B, M> {
-        CursorIterator::new(self, buffer)
+    /// Iterates through each cursor position as specified by a unit.
+    pub fn iter<B: View, Unit>(self, buffer: &B) -> Points<'_, B, Unit> {
+        Points::new(self, buffer)
     }
 }
 
 #[derive(Clone)]
-pub struct CursorIterator<'a, B: BufferView, M: Metric> {
+pub struct Points<'a, B: View, Unit> {
     anchor: Cursor,
     buffer: &'a B,
 
-    metric: PhantomData<&'a M>,
+    unit: PhantomData<Unit>,
 }
 
-impl<'a, M: Metric, B: BufferView> CursorIterator<'a, B, M> {
+impl<'a, Unit, B: View> Points<'a, B, Unit> {
     pub fn new(anchor: Cursor, buffer: &'a B) -> Self {
-        Self { anchor, buffer, metric: PhantomData::default() }
+        Self { anchor, buffer, unit: PhantomData::default() }
+    }
+
+    fn has_whitespace(&self, p: Cursor) -> Option<bool> {
+        self.buffer.get(p).map(char::is_whitespace)
+    }
+
+    fn has_character(&self, p: Cursor) -> Option<bool> {
+        self.has_whitespace(p).map(bool::not)
     }
 }
 
 pub struct Bounded;
 
-impl Metric for Bounded {}
-
-impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Bounded> {
+impl<'a, B: View> Iterator for Points<'a, B, Bounded> {
     type Item = Cursor;
 
     /// Moves a `Cursor` forwards inside a line by up to the specified amount.
@@ -70,7 +82,7 @@ impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Bounded> {
     }
 }
 
-impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Bounded> {
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, Bounded> {
     /// Moves a `Cursor` forwards inside a line by up to the specified amount.
     fn next_back(&mut self) -> Option<Self::Item> {
         let col = self.anchor.col();
@@ -82,10 +94,9 @@ impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Bounded> {
     }
 }
 
-pub struct Unbounded;
-impl Metric for Unbounded {}
+pub struct Char;
 
-impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Unbounded> {
+impl<'a, B: View> Iterator for Points<'a, B, Char> {
     type Item = Cursor;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -106,7 +117,7 @@ impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Unbounded> {
     }
 }
 
-impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Unbounded> {
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, Char> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let col = self.anchor.col();
         let row = self.anchor.row();
@@ -126,9 +137,8 @@ impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Unbounded>
 }
 
 pub struct Line;
-impl Metric for Line {}
 
-impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Line> {
+impl<'a, B: View> Iterator for Points<'a, B, Line> {
     type Item = Cursor;
 
     /// Moves a `Cursor` downward.
@@ -149,7 +159,7 @@ impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Line> {
     }
 }
 
-impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Line> {
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, Line> {
     /// Moves a `Cursor` upward.
     fn next_back(&mut self) -> Option<Self::Item> {
         let row = self.anchor.row();
@@ -169,19 +179,8 @@ impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Line> {
 }
 
 pub struct Word;
-impl Metric for Word {}
 
-impl<'a, B: BufferView> CursorIterator<'a, B, Word> {
-    fn has_whitespace(&self, p: &Cursor) -> Option<bool> {
-        self.buffer.get(p).map(char::is_whitespace)
-    }
-
-    fn has_character(&self, p: &Cursor) -> Option<bool> {
-        self.has_whitespace(p).map(bool::not)
-    }
-}
-
-impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Word> {
+impl<'a, B: View> Iterator for Points<'a, B, Word> {
     type Item = Cursor;
 
     /// Moves forward by a word unit.
@@ -191,24 +190,24 @@ impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Word> {
         // the `SemanticWord` and `Paragraph` implementations.
         self.anchor = self
             .anchor
-            .iter::<_, Unbounded>(self.buffer)
-            .skip_while(|p| self.has_character(p).unwrap_or(false))
-            .find(|p| self.has_character(p).unwrap_or(true))?;
+            .iter::<_, Char>(self.buffer)
+            .skip_while(|&p| self.has_character(p).unwrap_or(false))
+            .find(|&p| self.has_character(p).unwrap_or(true))?;
 
         Some(self.anchor)
     }
 }
 
-impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Word> {
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, Word> {
     /// Moves backward by a word unit.
     fn next_back(&mut self) -> Option<Self::Item> {
         // NOTE: In order to match Vim's behaviour, we want either:
         //  (1) A whitespace (at `previous`) followed by a character (at `current`).
         //  (2) The beginning of the buffer (`previous` is `None`) followed by anything.
 
-        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).rev().find(|current| {
-            match current.iter::<_, Unbounded>(self.buffer).next_back() {
-                Some(ref previous) => {
+        self.anchor = self.anchor.iter::<_, Char>(self.buffer).rev().find(|&current| {
+            match current.iter::<_, Char>(self.buffer).next_back() {
+                Some(previous) => {
                     self.has_whitespace(previous).expect("has_whitespace")
                         && self.has_character(current).expect("has_character")
                 },
@@ -222,23 +221,56 @@ impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Word> {
     }
 }
 
-pub struct Paragraph;
-impl Metric for Paragraph {}
+pub struct EndOfWord;
 
-impl<'a, B: BufferView> CursorIterator<'a, B, Paragraph> {
-    fn has_line_break(&self, p: &Cursor) -> Option<bool> {
+impl<'a, B: View> Iterator for Points<'a, B, EndOfWord> {
+    type Item = Cursor;
+
+    /// Moves forward to the end of word.
+    fn next(&mut self) -> Option<Self::Item> {
+        // NOTE: Read the note for `Word::next`.
+
+        self.anchor = self
+            .anchor
+            .iter::<_, Char>(self.buffer)
+            .skip_while(|&p| self.has_whitespace(p).unwrap_or(false))
+            .take_while(|&p| self.has_character(p).unwrap_or(true))
+            .last()?;
+
+        Some(self.anchor)
+    }
+}
+
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, EndOfWord> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.anchor = self
+            .anchor
+            .iter::<_, Char>(self.buffer)
+            .rev()
+            .skip_while(|&p| self.has_whitespace(p).unwrap_or(false))
+            .take_while(|&p| self.has_character(p).unwrap_or(true))
+            .next()?;
+
+        Some(self.anchor)
+    }
+}
+
+pub struct Paragraph;
+
+impl<'a, B: View> Points<'a, B, Paragraph> {
+    fn has_line_break(&self, p: Cursor) -> Option<bool> {
         self.buffer.get(p).map(|ch| ch == '\n')
     }
 }
 
-impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Paragraph> {
+impl<'a, B: View> Iterator for Points<'a, B, Paragraph> {
     type Item = Cursor;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).find(|p| {
-            match p.iter::<_, Unbounded>(self.buffer).next_back() {
-                Some(ref q) => {
-                    self.has_line_break(p).map(bool::not).unwrap_or(false)
+        self.anchor = self.anchor.iter::<_, Char>(self.buffer).find(|&p| {
+            match p.iter::<_, Char>(self.buffer).next_back() {
+                Some(q) => {
+                    self.has_line_break(p).map_or(false, bool::not)
                         && self.has_line_break(q).unwrap_or(false)
                 },
                 None => false,
@@ -249,12 +281,12 @@ impl<'a, B: BufferView> Iterator for CursorIterator<'a, B, Paragraph> {
     }
 }
 
-impl<'a, B: BufferView> DoubleEndedIterator for CursorIterator<'a, B, Paragraph> {
+impl<'a, B: View> DoubleEndedIterator for Points<'a, B, Paragraph> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.anchor = self.anchor.iter::<_, Unbounded>(self.buffer).rev().find(|p| {
-            match p.iter::<_, Unbounded>(self.buffer).next_back() {
-                Some(ref q) => {
-                    self.has_line_break(p).map(bool::not).unwrap_or(false)
+        self.anchor = self.anchor.iter::<_, Char>(self.buffer).rev().find(|&p| {
+            match p.iter::<_, Char>(self.buffer).next_back() {
+                Some(q) => {
+                    self.has_line_break(p).map_or(false, bool::not)
                         && self.has_line_break(q).unwrap_or(false)
                 },
                 None => false,

@@ -9,7 +9,8 @@ use tui::{
     Frame,
 };
 
-use crate::{buffer::BufferView, state::EditView};
+use six::buffer::View;
+use six::Cursor;
 
 pub struct Col(pub u16);
 pub struct Row(pub u16);
@@ -21,22 +22,14 @@ pub struct TextEditState<'a> {
     row: u16,
 }
 
-impl<'a, View: Borrow<EditView>> From<&'a View> for TextEditState<'a> {
-    fn from(view: &'a View) -> Self {
-        let view = view.borrow();
+impl<'a> TextEditState<'a> {
+    pub fn new(buffer: &'a impl View, cursor: Cursor) -> Self {
+        let buf = buffer.as_str();
 
-        let buf = view.buffer().as_str();
-
-        let row = view.cursor().row() as u16;
-        let col = view.cursor().col() as u16;
+        let row = cursor.row() as u16;
+        let col = cursor.col() as u16;
 
         Self { buf, row, col }
-    }
-}
-
-impl<'a> TextEditState<'a> {
-    pub fn new(buf: &'a str, col: Col, row: Row) -> Self {
-        Self { buf, col: col.0, row: row.0 }
     }
 }
 

@@ -3,7 +3,10 @@ use std::ops::{Bound, RangeBounds};
 
 use crate::cursor::Cursor;
 
-pub trait BufferView {
+#[derive(Debug, Clone, Default)]
+pub struct Buffer(String);
+
+pub trait View {
     /// Returns the number of characters in the buffer.
     fn len(&self) -> usize;
 
@@ -20,16 +23,13 @@ pub trait BufferView {
     fn origin(&self) -> Cursor;
 
     /// Returns the `char` at `point`.
-    fn get(&self, point: impl Borrow<Cursor>) -> Option<char>;
+    fn get(&self, point: Cursor) -> Option<char>;
 
-    /// Convers this `Buf` to a string.
+    /// Convers this `Buffer` to a string.
     fn as_str(&self) -> &str;
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Buf(String);
-
-impl Buf {
+impl Buffer {
     /// An iterator over the lines of a string, as string slices.
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.0.split('\n')
@@ -43,8 +43,8 @@ impl Buf {
         self.0.replace_range((start, end), text.as_ref());
     }
 
-    /// Inserts a character into this `Buf` at the specified position.
-    pub fn insert(&mut self, point: impl Borrow<Cursor>, ch: char) {
+    /// Inserts a character into this `Buffer` at the specified position.
+    pub fn insert(&mut self, point: Cursor, ch: char) {
         self.0.insert(to_offset(self.0.as_ref(), point.borrow()), ch);
     }
 
@@ -54,17 +54,17 @@ impl Buf {
     }
 }
 
-impl From<&str> for Buf {
-    /// Creates a `Buf` from a string slice.
+impl From<&str> for Buffer {
+    /// Creates a `Buffer` from a string slice.
     fn from(text: &str) -> Self {
         Self(text.into())
     }
 }
 
-// TODO: Implement `BufferView` for `Buf` slices, so we can call `Cursor` methods using slices.
+// TODO: Implement `View` for `Buffer` slices, so we can call `Cursor` methods using slices.
 
-impl BufferView for Buf {
-    /// Convers this `Buf` to a string.
+impl View for Buffer {
+    /// Convers this `Buffer` to a string.
     fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -86,10 +86,10 @@ impl BufferView for Buf {
     }
 
     fn cols_at(&self, line: usize) -> usize {
-        self.lines().nth(line).expect("Attempt to index past end of `Buf`").len()
+        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").len()
     }
 
-    fn get(&self, point: impl Borrow<Cursor>) -> Option<char> {
+    fn get(&self, point: Cursor) -> Option<char> {
         self.0.chars().nth(to_offset(self.0.as_ref(), point.borrow()))
     }
 }
@@ -104,7 +104,7 @@ fn to_offset(buffer: &str, point: &Cursor) -> usize {
 }
 
 fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
-    use Bound::*;
+    use Bound::{Excluded, Included, Unbounded};
 
     match bound {
         Unbounded => Unbounded,
@@ -112,58 +112,3 @@ fn to_offset_bound(buffer: &str, bound: Bound<&Cursor>) -> Bound<usize> {
         Excluded(p) => Excluded(to_offset(buffer, p)),
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use crate::buffer::*;
-//     use crate::point::Point;
-
-//     #[test]
-//     fn test_to_offset() {
-//         let buffer = String::from("lorem ipsum\ndolor sit amet");
-
-//         assert_eq!(to_offset(&buffer, Point { y: 0, x: 0 }), 0);
-//         assert_eq!(to_offset(&buffer, Point { y: 0, x: 5 }), 5);
-
-//         assert_eq!(to_offset(&buffer, Point { y: 1, x: 0 }), 12);
-//         assert_eq!(to_offset(&buffer, Point { y: 1, x: 5 }), 17);
-//     }
-
-//     #[test]
-//     fn test_insert_at_start() {
-//         let mut buffer = String::from("foo");
-//         Buf::insert(&mut buffer, Point { x: 0, y: 0 }, 'f');
-
-//         assert_eq!(buffer, "ffoo");
-//     }
-
-//     #[test]
-//     fn test_insert_after_break() {
-//         let mut buffer = String::from("foo\nbar");
-//         let point = Point { x: 0, y: 1 };
-
-//         Buf::insert(&mut buffer, point, 'b');
-
-//         assert_eq!(buffer, "foo\nbbar");
-//     }
-
-//     #[test]
-//     fn test_insert_before_break() {
-//         let mut buffer = String::from("foo\nbar");
-//         let point = Point { x: 0, y: 0 }.eol(&buffer).unwrap();
-
-//         Buf::insert(&mut buffer, point, 'o');
-
-//         assert_eq!(buffer, "fooo\nbar");
-//     }
-
-//     #[test]
-//     fn test_insert_at_end() {
-//         let mut buffer = String::from("foo\nbar");
-//         let point = Point { x: 0, y: 1 }.eol(&buffer).unwrap();
-
-//         Buf::insert(&mut buffer, point, 'r');
-
-//         assert_eq!(buffer, "foo\nbarr");
-//     }
-// }
