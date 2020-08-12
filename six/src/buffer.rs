@@ -15,8 +15,8 @@ impl Buffer {
     }
 
     /// Inserts a character into this `Buffer` at the specified position.
-    pub fn insert(&mut self, offset: usize, ch: char) {
-        self.0.insert(offset, ch);
+    pub fn insert(&mut self, idx: usize, ch: char) {
+        self.0.insert(idx, ch);
     }
 
     /// Deletes the text in the specified range.
@@ -39,9 +39,9 @@ impl Buffer {
         self.0.is_empty()
     }
 
-    /// Returns the `char` at `offset`.
-    pub fn get(&self, offset: usize) -> Option<char> {
-        self.0.chars().nth(offset)
+    /// Returns the `char` at `idx`.
+    pub fn get(&self, idx: usize) -> Option<char> {
+        self.0.chars().nth(idx)
     }
 
     /// Returns the number of lines in the buffer.
@@ -51,7 +51,7 @@ impl Buffer {
 
     /// Returns the number of characters in the specified line, excluding the line break.
     pub fn cols_at(&self, line: usize) -> usize {
-        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").len()
+        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").chars().count()
     }
 }
 

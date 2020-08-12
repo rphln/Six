@@ -178,20 +178,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (Normal { .. }, Char('i')) => Action::ToInsert { forward: false },
                 (Normal { .. }, Char('a')) => Action::ToInsert { forward: true },
 
+                (Normal { .. }, Char('o')) => Action::ToInsertBelow,
+                (Normal { .. }, Char('O')) => Action::ToInsertAbove,
+
                 (Normal { .. }, Char(';')) => Action::ToEval {},
 
                 (_, Char('s')) => Action::ToSurround {},
 
                 (_, Char('0')) => Action::TextObject(TextObject::Bol),
-                (_, Char('W')) => Action::TextObject(TextObject::Word),
-                (_, Char('E')) => Action::TextObject(TextObject::Eow),
+
+                (_, Char('W')) => Action::TextObject(TextObject::Head),
+                (_, Char('E')) => Action::TextObject(TextObject::Tail),
+
+                (_, Char('{')) => Action::TextObject(TextObject::Paragraph { forward: false }),
+                (_, Char('}')) => Action::TextObject(TextObject::Paragraph { forward : true }),
 
                 (_, Up) => Action::TextObject(TextObject::Up),
                 (_, Down) => Action::TextObject(TextObject::Down),
                 (_, Left) => Action::TextObject(TextObject::Left),
                 (_, Right) => Action::TextObject(TextObject::Right),
 
-                _ => todo!(),
+                _ => Action::Escape { backward: false},
             };
 
             handle_key(&mut state, &mut lua, action)?;

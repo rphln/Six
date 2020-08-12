@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rlua::{Context, Lua, UserData, UserDataMethods};
 
 use crate::buffer::Buffer;
-use crate::cursor::{Bounded, Cursor, EndOfWord, Iter, Line, Word};
+use crate::cursor::{Bounded, Cursor, Head, Iter, Line, Paragraph, Tail};
 
 // TODO: Replace with a trait alias once it stabilizes.
 pub trait Callback<Arg>:
@@ -269,7 +269,13 @@ impl Editor {
 
     /// Inserts a character at the specified position.
     pub fn insert(&mut self, at: Cursor, ch: char) {
-        self.content.insert(at.to_offset(&self.content), ch);
+        self.content.insert(at.to_index(&self.content), ch);
+    }
+
+    /// Inserts a character at the cursor and pushes it forward.
+    pub fn insert_and_advance(&mut self, ch: char) {
+        self.insert(self.cursor(), ch);
+        self.forward::<char>(1);
     }
 
     /// Removes the specified range in the buffer, and replaces it with the given string.
@@ -278,14 +284,14 @@ impl Editor {
         use std::ops::Bound::{Excluded, Included, Unbounded};
 
         let start = match range.start_bound() {
-            Included(ref start) => Included(start.to_offset(&self.content)),
-            Excluded(ref start) => Excluded(start.to_offset(&self.content)),
+            Included(ref start) => Included(start.to_index(&self.content)),
+            Excluded(ref start) => Excluded(start.to_index(&self.content)),
             Unbounded => Unbounded,
         };
 
         let end = match range.start_bound() {
-            Included(ref end) => Included(end.to_offset(&self.content)),
-            Excluded(ref end) => Excluded(end.to_offset(&self.content)),
+            Included(ref end) => Included(end.to_index(&self.content)),
+            Excluded(ref end) => Excluded(end.to_index(&self.content)),
             Unbounded => Unbounded,
         };
 
@@ -345,14 +351,16 @@ impl UserData for &mut Editor {
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub enum TextObject {
-    Word,
+    Head,
     Bol,
-    Eow,
+    Tail,
 
     Up,
     Down,
     Left,
     Right,
+
+    Paragraph { forward: bool },
 }
 
 /// Built-in editor actions.
@@ -422,7 +430,13 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
             state.escape();
 
             if backward {
-                state.backward::<Bounded>(1);
+                state.set_cursor(
+                    state
+                        .cursor()
+                        .iter::<Bounded>(&state.content)
+                        .next_back()
+                        .unwrap_or(state.cursor()),
+                );
             }
         },
 
@@ -432,6 +446,84 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
             if forward {
                 state.forward::<Bounded>(1);
             }
+        },
+
+        Action::ToInsertEol => {
+            state.set_cursor(
+                state.cursor().iter::<Bounded>(state.content()).last().unwrap_or(state.cursor()),
+            );
+
+            state.edit();
+        },
+
+        Action::ToInsertBol => {
+            state.set_cursor(
+                state
+                    .cursor()
+                    .iter::<Bounded>(state.content())
+                    .rev()
+                    .last()
+                    .unwrap_or(state.cursor()),
+            );
+
+            state.edit();
+        },
+
+        Action::ToInsertBelow => {
+            let content = state.content();
+            let cursor = state
+                .cursor()
+                .iter::<Bounded>(content)
+                .rev()
+                .last()
+                .map(|cursor| {
+                    cursor
+                        .iter::<Bounded>(content)
+                        .find(|c| {
+                            content.get(c.to_index(content)).map_or(false, |c| !c.is_whitespace())
+                        })
+                        .unwrap_or(cursor)
+                })
+                .unwrap_or_else(|| state.cursor());
+
+            state.set_cursor(
+                state.cursor().iter::<Bounded>(state.content()).last().unwrap_or(state.cursor()),
+            );
+            state.insert_and_advance('\n');
+
+            while state.cursor().col() < cursor.col() {
+                state.insert_and_advance(' ');
+            }
+
+            state.edit();
+        },
+
+        Action::ToInsertAbove => {
+            let content = state.content();
+            let cursor = state
+                .cursor()
+                .iter::<Bounded>(content)
+                .rev()
+                .last()
+                .map(|cursor| {
+                    cursor
+                        .iter::<Bounded>(content)
+                        .find(|c| {
+                            content.get(c.to_index(content)).map_or(false, |c| !c.is_whitespace())
+                        })
+                        .unwrap_or(cursor)
+                })
+                .unwrap_or_else(|| state.cursor());
+
+            state.first::<Bounded>();
+            state.insert(state.cursor(), '\n');
+            state.backward::<char>(1);
+
+            while state.cursor().col() < cursor.col() {
+                state.insert_and_advance(' ');
+            }
+
+            state.edit();
         },
 
         Action::ToEval {} => {
@@ -448,7 +540,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
                 // Replicates `vim-surround` by skipping any spaces at the end.
                 let buf = state.content();
                 let end = end
-                    .iter::<EndOfWord>(buf)
+                    .iter::<Tail>(buf)
                     .rev()
                     .next()
                     .and_then(|end| end.iter::<char>(buf).next())
@@ -479,7 +571,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::Input(ch) => {
             if let Mode::Query { length, mut content, cursor, .. } = state.mode.clone() {
-                content.insert(cursor.to_offset(&content), ch);
+                content.insert(cursor.to_index(&content), ch);
 
                 if ch == '\n' || length.map_or(false, |length| length == content.len()) {
                     state.after_query(lua, content.as_str())?;
@@ -507,27 +599,45 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
             }
         },
 
-        Action::TextObject(TextObject::Word) => {
+        Action::TextObject(TextObject::Head) => {
             let start = state.cursor();
-            state.forward::<Word>(1);
+            state.forward::<Head>(1);
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
             }
         },
 
-        Action::TextObject(TextObject::Eow) => {
+        Action::TextObject(TextObject::Tail) => {
             let start = state.cursor();
-            state.forward::<EndOfWord>(1);
+            state.forward::<Tail>(1);
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
+            }
+        },
+
+        Action::TextObject(TextObject::Paragraph { forward: true }) => {
+            let start = state.cursor();
+            state.forward::<Paragraph>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, start, state.cursor())?;
+            }
+        },
+
+        Action::TextObject(TextObject::Paragraph { forward: false }) => {
+            let end = state.cursor();
+            state.backward::<Paragraph>(1);
+
+            if let Mode::Operator { .. } = state.mode {
+                state.after_operator(lua, state.cursor(), end)?;
             }
         },
 
         Action::TextObject(TextObject::Left) => {
             let end = state.cursor();
-            state.backward::<Bounded>(1);
+            state.set_cursor(end.iter::<Bounded>(&state.content).next_back().unwrap_or(end));
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, state.cursor(), end)?;
@@ -536,7 +646,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::TextObject(TextObject::Up) => {
             let end = state.cursor();
-            state.backward::<Line>(1);
+            state.set_cursor(end.iter::<Line>(&state.content).next_back().unwrap_or(end));
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, state.cursor(), end)?;
@@ -545,7 +655,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::TextObject(TextObject::Down) => {
             let start = state.cursor();
-            state.forward::<Line>(1);
+            state.set_cursor(start.iter::<Line>(&state.content).next().unwrap_or(start));
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
@@ -554,14 +664,14 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::TextObject(TextObject::Right) => {
             let start = state.cursor();
-            state.forward::<Bounded>(1);
+            state.set_cursor(start.iter::<Bounded>(&state.content).next().unwrap_or(start));
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
             }
         },
 
-        _ => todo!(),
+        _ => (),
     };
 
     Ok(())
