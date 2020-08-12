@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rlua::{Context, Lua, UserData, UserDataMethods};
 
 use crate::buffer::Buffer;
-use crate::cursor::{Bounded, Cursor, Head, Iter, Line, Paragraph, Tail};
+use crate::cursor::{Bounded, Codepoint, Cursor, Head, Iter, Line, Paragraph, Tail};
 
 // TODO: Replace with a trait alias once it stabilizes.
 pub trait Callback<Arg>:
@@ -195,107 +195,46 @@ impl Editor {
         self.cursor = cursor;
     }
 
+    /// Returns the last position in the buffer.
+    pub fn eob(&self) -> Cursor {
+        Cursor::new(self.content().len())
+    }
+
     /// Moves the cursor forward up to the specified units according to the specified unit.
-    pub fn forward<'a, M>(&'a mut self, n: usize)
-    where
-        Iter<'a, M>: Iterator<Item = Cursor>,
-    {
-        self.cursor = self
-            .cursor
-            .iter::<M>(&self.content)
-            .take(n)
-            .last()
-            .or_else(|| {
-                // FIXME: This is, of course, horribly inefficient.
-                // Also, we probably should accept this lambda as an argument instead.
-                self.cursor.iter::<char>(&self.content).last()
-            })
-            .unwrap_or(self.cursor);
+    pub fn forward_or<'a, M: Iter<'a>>(&'a mut self, n: usize, default: Cursor) {
+        self.cursor = self.cursor.iter::<M>(&self.content).take(n).last().unwrap_or(default);
     }
 
     /// Moves the cursor forward the last position according to the specified unit.
-    pub fn last<'a, M>(&'a mut self)
-    where
-        Iter<'a, M>: Iterator<Item = Cursor>,
-    {
-        self.cursor = self
-            .cursor
-            .iter::<M>(&self.content)
-            .last()
-            .or_else(|| {
-                // FIXME: This is, of course, horribly inefficient.
-                // Also, we probably should accept this lambda as an argument instead.
-                self.cursor.iter::<char>(&self.content).last()
-            })
-            .unwrap_or(self.cursor);
+    pub fn last<'a, M: Iter<'a>>(&'a mut self) {
+        self.cursor = self.cursor.iter::<M>(&self.content).last().unwrap_or(self.cursor);
     }
 
     /// Moves the cursor backward up to the specified units according to the specified unit.
-    pub fn backward<'a, M>(&'a mut self, n: usize)
-    where
-        Iter<'a, M>: DoubleEndedIterator<Item = Cursor>,
-    {
-        self.cursor = self
-            .cursor
-            .iter::<M>(&self.content)
-            .rev()
-            .take(n)
-            .last()
-            .or_else(|| {
-                // FIXME: This is, of course, horribly inefficient.
-                // Also, we probably should accept this lambda as an argument instead.
-                self.cursor.iter::<char>(&self.content).rev().last()
-            })
-            .unwrap_or(self.cursor);
+    pub fn backward_or<'a, M: Iter<'a>>(&'a mut self, n: usize, default: Cursor) {
+        self.cursor = self.cursor.iter::<M>(&self.content).rev().take(n).last().unwrap_or(default);
     }
 
     /// Moves the cursor backward the last position according to the specified unit.
-    pub fn first<'a, M>(&'a mut self)
-    where
-        Iter<'a, M>: DoubleEndedIterator<Item = Cursor>,
-    {
-        self.cursor = self
-            .cursor
-            .iter::<M>(&self.content)
-            .rev()
-            .last()
-            .or_else(|| {
-                // FIXME: This is, of course, horribly inefficient.
-                // Also, we probably should accept this lambda as an argument instead.
-                self.cursor.iter::<char>(&self.content).rev().last()
-            })
-            .unwrap_or(self.cursor);
+    pub fn first<'a, M: Iter<'a>>(&'a mut self) {
+        self.cursor = self.cursor.iter::<M>(&self.content).rev().last().unwrap_or(self.cursor);
     }
 
     /// Inserts a character at the specified position.
     pub fn insert(&mut self, at: Cursor, ch: char) {
-        self.content.insert(at.to_index(&self.content), ch);
+        self.content.insert(at.index, ch);
     }
 
     /// Inserts a character at the cursor and pushes it forward.
     pub fn insert_and_advance(&mut self, ch: char) {
         self.insert(self.cursor(), ch);
-        self.forward::<char>(1);
+        self.forward_or::<Codepoint>(1, self.eob());
     }
 
     /// Removes the specified range in the buffer, and replaces it with the given string.
     #[inline]
-    pub fn replace_range(&mut self, range: impl RangeBounds<Cursor>, text: &str) {
-        use std::ops::Bound::{Excluded, Included, Unbounded};
-
-        let start = match range.start_bound() {
-            Included(ref start) => Included(start.to_index(&self.content)),
-            Excluded(ref start) => Excluded(start.to_index(&self.content)),
-            Unbounded => Unbounded,
-        };
-
-        let end = match range.start_bound() {
-            Included(ref end) => Included(end.to_index(&self.content)),
-            Excluded(ref end) => Excluded(end.to_index(&self.content)),
-            Unbounded => Unbounded,
-        };
-
-        self.content.edit((start, end), text);
+    pub fn replace_range(&mut self, range: impl RangeBounds<usize>, text: &str) {
+        self.content.edit(range, text);
     }
 
     /// Executes a Lua program.
@@ -334,14 +273,14 @@ impl UserData for Cursor {}
 impl UserData for &mut Editor {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
         methods.add_method_mut("insert_at_cursor", |_, state, text: String| {
-            state.replace_range(state.cursor..state.cursor, text.as_str());
+            state.replace_range(state.cursor.index..state.cursor.index, text.as_str());
             Ok(())
         });
 
         methods.add_method("cursor", |_, state, ()| Ok(state.cursor));
 
         methods.add_method_mut("delete", |_, state, at: Cursor| {
-            state.replace_range(at..=at, "");
+            state.replace_range(at.index..=at.index, "");
             Ok(())
         })
     }
@@ -360,7 +299,7 @@ pub enum TextObject {
     Left,
     Right,
 
-    Paragraph { forward: bool },
+    Paragraph { advance: bool },
 }
 
 /// Built-in editor actions.
@@ -374,8 +313,8 @@ pub enum Action {
 
     /// Enters the `Insert` mode.
     ///
-    /// If `forward` is set, move the cursor forward by a character within a line.
-    ToInsert { forward: bool },
+    /// If `advance` is set, move the cursor forward_or by a character within a line.
+    ToInsert { advance: bool },
 
     /// Moves the cursor to the end of the line and enters the `Insert` mode.
     ToInsertEol,
@@ -404,7 +343,7 @@ pub enum Action {
     /// Enters the `Select` mode.
     ToSelect,
 
-    /// Inserts the character at the cursor, and then moves the cursor forward.
+    /// Inserts the character at the cursor, and then moves the cursor forward_or.
     #[derivative(Debug = "transparent")]
     Input(char),
 
@@ -440,32 +379,21 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
             }
         },
 
-        Action::ToInsert { forward } => {
+        Action::ToInsert { advance } => {
             state.edit();
 
-            if forward {
-                state.forward::<Bounded>(1);
+            if advance {
+                state.forward_or::<Bounded>(1, state.cursor());
             }
         },
 
         Action::ToInsertEol => {
-            state.set_cursor(
-                state.cursor().iter::<Bounded>(state.content()).last().unwrap_or(state.cursor()),
-            );
-
+            state.last::<Bounded>();
             state.edit();
         },
 
         Action::ToInsertBol => {
-            state.set_cursor(
-                state
-                    .cursor()
-                    .iter::<Bounded>(state.content())
-                    .rev()
-                    .last()
-                    .unwrap_or(state.cursor()),
-            );
-
+            state.first::<Bounded>();
             state.edit();
         },
 
@@ -479,19 +407,15 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
                 .map(|cursor| {
                     cursor
                         .iter::<Bounded>(content)
-                        .find(|c| {
-                            content.get(c.to_index(content)).map_or(false, |c| !c.is_whitespace())
-                        })
+                        .find(|c| content.get(c.index).map_or(false, |c| !c.is_whitespace()))
                         .unwrap_or(cursor)
                 })
                 .unwrap_or_else(|| state.cursor());
 
-            state.set_cursor(
-                state.cursor().iter::<Bounded>(state.content()).last().unwrap_or(state.cursor()),
-            );
+            state.last::<Bounded>();
             state.insert_and_advance('\n');
 
-            while state.cursor().col() < cursor.col() {
+            while state.cursor().to_col(state.content()) < cursor.to_col(state.content()) {
                 state.insert_and_advance(' ');
             }
 
@@ -508,18 +432,16 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
                 .map(|cursor| {
                     cursor
                         .iter::<Bounded>(content)
-                        .find(|c| {
-                            content.get(c.to_index(content)).map_or(false, |c| !c.is_whitespace())
-                        })
+                        .find(|c| content.get(c.index).map_or(false, |c| !c.is_whitespace()))
                         .unwrap_or(cursor)
                 })
                 .unwrap_or_else(|| state.cursor());
 
             state.first::<Bounded>();
             state.insert(state.cursor(), '\n');
-            state.backward::<char>(1);
+            state.backward_or::<Codepoint>(1, state.eob());
 
-            while state.cursor().col() < cursor.col() {
+            while state.cursor().to_col(state.content()) < cursor.to_col(state.content()) {
                 state.insert_and_advance(' ');
             }
 
@@ -543,7 +465,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
                     .iter::<Tail>(buf)
                     .rev()
                     .next()
-                    .and_then(|end| end.iter::<char>(buf).next())
+                    .and_then(|end| end.iter::<Codepoint>(buf).next())
                     .unwrap_or(end);
 
                 let surround = move |state: &mut Editor, _: &mut Lua, sandwich: &str| {
@@ -571,12 +493,12 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::Input(ch) => {
             if let Mode::Query { length, mut content, cursor, .. } = state.mode.clone() {
-                content.insert(cursor.to_index(&content), ch);
+                content.insert(cursor.index, ch);
 
                 if ch == '\n' || length.map_or(false, |length| length == content.len()) {
                     state.after_query(lua, content.as_str())?;
                 } else {
-                    let next_cursor = cursor.iter::<char>(&content).next().expect("next");
+                    let next_cursor = cursor.iter::<Codepoint>(&content).next().expect("next");
                     let next_content = content;
 
                     if let Mode::Query { ref mut cursor, ref mut content, .. } = state.mode {
@@ -585,8 +507,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
                     }
                 }
             } else {
-                state.insert(state.cursor, ch);
-                state.forward::<char>(1);
+                state.insert_and_advance(ch);
             }
         },
 
@@ -601,7 +522,7 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::TextObject(TextObject::Head) => {
             let start = state.cursor();
-            state.forward::<Head>(1);
+            state.forward_or::<Head>(1, state.eob());
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
@@ -610,25 +531,25 @@ pub fn handle_key(state: &mut Editor, lua: &mut Lua, action: Action) -> Result<(
 
         Action::TextObject(TextObject::Tail) => {
             let start = state.cursor();
-            state.forward::<Tail>(1);
+            state.forward_or::<Tail>(1, state.eob());
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
             }
         },
 
-        Action::TextObject(TextObject::Paragraph { forward: true }) => {
+        Action::TextObject(TextObject::Paragraph { advance: true }) => {
             let start = state.cursor();
-            state.forward::<Paragraph>(1);
+            state.forward_or::<Paragraph>(1, state.eob());
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, start, state.cursor())?;
             }
         },
 
-        Action::TextObject(TextObject::Paragraph { forward: false }) => {
+        Action::TextObject(TextObject::Paragraph { advance: false }) => {
             let end = state.cursor();
-            state.backward::<Paragraph>(1);
+            state.backward_or::<Paragraph>(1, state.eob());
 
             if let Mode::Operator { .. } = state.mode {
                 state.after_operator(lua, state.cursor(), end)?;

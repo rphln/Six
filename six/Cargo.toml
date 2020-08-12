@@ -9,3 +9,4 @@ exclude = ["assets/**"]
 [dependencies]
 rlua = "0.17.0"
 derivative = "2.1.1"
+unicode-width = "0.1.5"

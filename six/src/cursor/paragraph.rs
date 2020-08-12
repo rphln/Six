@@ -1,43 +1,49 @@
+use crate::buffer::Buffer;
+use crate::cursor::{Codepoint, Cursor, Iter};
 
+pub struct Paragraph<'a> {
+    chars: Codepoint<'a>,
+    buffer: &'a Buffer,
+}
 
-use crate::cursor::{Cursor, Iter};
-
-pub struct Paragraph;
-
-impl Iterator for Iter<'_, Paragraph> {
-    type Item = Cursor;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.anchor = self.anchor.iter::<char>(self.buffer).find(|&cursor| {
-            let idx = cursor.to_index(self.buffer);
-
-            let p = idx.checked_sub(2).and_then(|idx| self.buffer.get(idx));
-            let q = idx.checked_sub(1).and_then(|idx| self.buffer.get(idx));
-            let r = self.buffer.get(idx);
-
-            p.map_or(false, |ch| ch != '\n')
-                && q.map_or(false, |ch| ch == '\n')
-                && r.map_or(false, |ch| ch == '\n')
-        })?;
-
-        Some(self.anchor)
+impl<'a> Iter<'a> for Paragraph<'a> {
+    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
+        Self { buffer, chars: Codepoint::new(cursor, buffer) }
     }
 }
 
-impl DoubleEndedIterator for Iter<'_, Paragraph> {
+impl Iterator for Paragraph<'_> {
+    type Item = Cursor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+        // let buffer = self.buffer;
+        // self.chars.find(|&cursor| {
+        //     let p = cursor.index.checked_sub(2).and_then(|idx| buffer.get(idx..=idx));
+        //     let q = cursor.index.checked_sub(1).and_then(|idx| buffer.get(idx..=idx));
+        //     let r = buffer.get(cursor.index..=cursor.index);
+
+        //     p.map_or(false, |ch| ch != '\n')
+        //         && q.map_or(false, |ch| ch == '\n')
+        //         && r.map_or(false, |ch| ch == '\n')
+        // })
+    }
+}
+
+impl DoubleEndedIterator for Paragraph<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.anchor = self.anchor.iter::<char>(self.buffer).rev().find(|&cursor| {
-            let idx = cursor.to_index(self.buffer);
+        todo!()
+        // let buffer = self.buffer;
+        // self.chars.rfind(|&cursor| {
+        //     let idx = cursor.to_index(buffer);
 
-            let p = idx.checked_sub(1).and_then(|idx| self.buffer.get(idx));
-            let q = self.buffer.get(idx);
-            let r = self.buffer.get(idx + 1);
+        //     let p = idx.checked_sub(1).and_then(|idx| buffer.get(idx));
+        //     let q = buffer.get(idx);
+        //     let r = buffer.get(idx + 1);
 
-            p.map_or(true, |ch| ch == '\n')
-                && q.map_or(false, |ch| ch == '\n')
-                && r.map_or(false, |ch| ch != '\n')
-        })?;
-
-        Some(self.anchor)
+        //     p.map_or(true, |ch| ch == '\n')
+        //         && q.map_or(false, |ch| ch == '\n')
+        //         && r.map_or(false, |ch| ch != '\n')
+        // })
     }
 }

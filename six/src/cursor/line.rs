@@ -1,43 +1,27 @@
+use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Iter};
 
-pub struct Line;
+pub struct Line<'a> {
+    cursor: Cursor,
+    buffer: &'a Buffer,
+}
 
-impl Iterator for Iter<'_, Line> {
-    type Item = Cursor;
-
-    /// Moves a `Cursor` downward.
-    fn next(&mut self) -> Option<Self::Item> {
-        let row = self.anchor.row();
-
-        self.anchor = if row + 1 < self.buffer.rows() {
-            Some(Cursor {
-                row: row + 1,
-                col: self.anchor.offset.min(self.buffer.cols_at(row + 1)),
-                offset: self.anchor.offset,
-            })
-        } else {
-            None
-        }?;
-
-        Some(self.anchor)
+impl<'a> Iter<'a> for Line<'a> {
+    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
+        Self { cursor, buffer }
     }
 }
 
-impl DoubleEndedIterator for Iter<'_, Line> {
-    /// Moves a `Cursor` upward.
+impl Iterator for Line<'_> {
+    type Item = Cursor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
+
+impl DoubleEndedIterator for Line<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let row = self.anchor.row();
-
-        self.anchor = if row > 0 {
-            Some(Cursor {
-                row: row - 1,
-                col: self.anchor.offset.min(self.buffer.cols_at(row - 1)),
-                offset: self.anchor.offset,
-            })
-        } else {
-            None
-        }?;
-
-        Some(self.anchor)
+        todo!()
     }
 }

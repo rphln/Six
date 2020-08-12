@@ -35,7 +35,7 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) 
     let ruler = area[0];
     let body = area[1];
 
-    let mut stat = TextEditState::new(state.content().as_str(), state.cursor());
+    let mut stat = TextEditState::new(state.content(), state.cursor());
     let view = TextEditView::new(Overflow::Scroll);
 
     let (y, _) = view.scroll(body, &stat);
@@ -43,7 +43,7 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) 
     // TODO: Don't pointlessy render all markers.
     let markers: Vec<_> = (1..=state.content().rows())
         .map(|n| {
-            let style = if n == state.cursor().row() + 1 {
+            let style = if n == state.cursor().to_row(state.content()) + 1 {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default()
@@ -81,7 +81,7 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
         Mode::Operator { prompt, .. } => prompt,
     };
 
-    let position = state.cursor().col().to_string();
+    let position = state.cursor().to_col(state.content()).to_string();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -104,7 +104,7 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(position, chunks[2]);
 
     if let Mode::Query { content, cursor, .. } = state.mode() {
-        let mut stat = TextEditState::new(content.as_str(), *cursor);
+        let mut stat = TextEditState::new(content, *cursor);
         let view = TextEditView::new(Overflow::Scroll);
 
         view.focus(chunks[1], frame, &stat);
@@ -175,8 +175,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (Query { .. }, Char(ch)) => Action::Input(ch),
                 (Query { .. }, Esc) => Action::Escape { backward: false },
 
-                (Normal { .. }, Char('i')) => Action::ToInsert { forward: false },
-                (Normal { .. }, Char('a')) => Action::ToInsert { forward: true },
+                (Normal { .. }, Char('i')) => Action::ToInsert { advance: false },
+                (Normal { .. }, Char('a')) => Action::ToInsert { advance: true },
 
                 (Normal { .. }, Char('o')) => Action::ToInsertBelow,
                 (Normal { .. }, Char('O')) => Action::ToInsertAbove,
@@ -190,15 +190,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (_, Char('W')) => Action::TextObject(TextObject::Head),
                 (_, Char('E')) => Action::TextObject(TextObject::Tail),
 
-                (_, Char('{')) => Action::TextObject(TextObject::Paragraph { forward: false }),
-                (_, Char('}')) => Action::TextObject(TextObject::Paragraph { forward : true }),
+                (_, Char('{')) => Action::TextObject(TextObject::Paragraph { advance: false }),
+                (_, Char('}')) => Action::TextObject(TextObject::Paragraph { advance: true }),
 
                 (_, Up) => Action::TextObject(TextObject::Up),
                 (_, Down) => Action::TextObject(TextObject::Down),
                 (_, Left) => Action::TextObject(TextObject::Left),
                 (_, Right) => Action::TextObject(TextObject::Right),
 
-                _ => Action::Escape { backward: false},
+                _ => Action::Escape { backward: false },
             };
 
             handle_key(&mut state, &mut lua, action)?;

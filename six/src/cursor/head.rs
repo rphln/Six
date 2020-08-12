@@ -1,39 +1,39 @@
-use crate::cursor::{Cursor, Iter};
+use crate::buffer::Buffer;
+use crate::cursor::{Codepoint, Cursor, Iter};
 
-pub struct Head;
+pub struct Head<'a> {
+    chars: Codepoint<'a>,
+    buffer: &'a Buffer,
+}
 
-impl Iter<'_, Head> {
-    fn is_word_head(&self, cursor: Cursor) -> bool {
-        let idx = cursor.to_index(self.buffer);
+fn is_word_head(cursor: Cursor, buffer: &Buffer) -> bool {
+    cursor
+        .prev::<Codepoint>(buffer)
+        .and_then(|cursor| buffer.get(cursor.index))
+        .map_or(true, |ch| ch.is_whitespace())
+        && buffer.get(cursor.index).map_or(false, |ch| !ch.is_whitespace())
+}
 
-        idx.checked_sub(1)
-            .and_then(|idx| self.buffer.get(idx))
-            .map_or(true, |ch| ch.is_whitespace())
-            && self.buffer.get(idx).map_or(false, |ch| !ch.is_whitespace())
+impl<'a> Iter<'a> for Head<'a> {
+    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
+        Self { buffer, chars: Codepoint::new(cursor, buffer) }
     }
 }
 
-impl Iterator for Iter<'_, Head> {
+impl Iterator for Head<'_> {
     type Item = Cursor;
 
     /// Moves forward by a word unit.
     fn next(&mut self) -> Option<Self::Item> {
-        self.anchor =
-            self.anchor.iter::<char>(self.buffer).find(|&cursor| self.is_word_head(cursor))?;
-
-        Some(self.anchor)
+        let buffer = self.buffer;
+        self.chars.find(|&cursor| is_word_head(cursor, buffer))
     }
 }
 
-impl DoubleEndedIterator for Iter<'_, Head> {
+impl DoubleEndedIterator for Head<'_> {
     /// Moves backward by a word unit.
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.anchor = self
-            .anchor
-            .iter::<char>(self.buffer)
-            .rev()
-            .find(|&cursor| self.is_word_head(cursor))?;
-
-        Some(self.anchor)
+        let buffer = self.buffer;
+        self.chars.rfind(|&cursor| is_word_head(cursor, buffer))
     }
 }

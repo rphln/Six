@@ -21,9 +21,11 @@ pub struct TextEditState<'a> {
 
 impl<'a> TextEditState<'a> {
     /// Initializes the editor view state from a string and a cursor.
-    pub fn new(content: &'a str, cursor: six::Cursor) -> Self {
-        let col = cursor.col() as u16;
-        let row = cursor.row() as u16;
+    pub fn new(buffer: &'a six::Buffer, cursor: six::Cursor) -> Self {
+        let content = buffer.as_str();
+
+        let col = cursor.to_col(buffer) as u16;
+        let row = cursor.to_row(buffer) as u16;
 
         Self { content, col, row }
     }

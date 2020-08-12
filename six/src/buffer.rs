@@ -1,4 +1,4 @@
-use std::ops::RangeBounds;
+use std::ops::{Index, RangeBounds};
 
 #[derive(Debug, Clone, Default)]
 pub struct Buffer(String);
@@ -41,7 +41,7 @@ impl Buffer {
 
     /// Returns the `char` at `idx`.
     pub fn get(&self, idx: usize) -> Option<char> {
-        self.0.chars().nth(idx)
+        self.0[idx..].chars().next()
     }
 
     /// Returns the number of lines in the buffer.
@@ -58,5 +58,29 @@ impl Buffer {
 impl From<&str> for Buffer {
     fn from(text: &str) -> Self {
         Self(text.into())
+    }
+}
+
+impl<R: RangeBounds<usize>> Index<R> for Buffer {
+    type Output = str;
+
+    fn index(&self, index: R) -> &str {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let buf = self.as_str();
+
+        match (index.start_bound(), index.end_bound()) {
+            (Included(&p), Included(&q)) => &buf[p..=q],
+            (Included(&p), Excluded(&q)) => &buf[p..q],
+            (Included(&p), Unbounded) => &buf[p..],
+
+            (Excluded(&p), Included(&q)) => &buf[(p + 1)..=q],
+            (Excluded(&p), Excluded(&q)) => &buf[(p + 1)..q],
+            (Excluded(&p), Unbounded) => &buf[(p + 1)..],
+
+            (Unbounded, Included(&q)) => &buf[..=q],
+            (Unbounded, Excluded(&q)) => &buf[..q],
+            (Unbounded, Unbounded) => &buf[..],
+        }
     }
 }
