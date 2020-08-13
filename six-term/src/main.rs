@@ -1,9 +1,12 @@
 //! Six - A Vi-like toy text editor.
 
 #![deny(clippy::all, clippy::pedantic)]
+#![feature(generator_trait)]
 
 use std::error::Error;
 use std::io;
+use std::ops::Generator;
+use std::pin::Pin;
 
 use tui::{
     backend::{Backend, TermionBackend},
@@ -15,52 +18,21 @@ use tui::{
     Frame, Terminal,
 };
 
+use termion::event::Key::{Char, Ctrl};
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
-use six::{
-    state::{handle_key, Action, Editor, Mode, TextObject},
-    Lua,
-};
+use six::state::{Editor, Mode, World};
 
 mod buffer_view;
 
 use crate::buffer_view::{Overflow, TextEditState, TextEditView};
 
 fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
-    let area = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(vec![Constraint::Length(4), Constraint::Min(1)])
-        .split(area);
-
-    let ruler = area[0];
-    let body = area[1];
-
-    let mut stat = TextEditState::new(state.content(), state.cursor());
+    let mut stat = TextEditState::new(state.buffer(), state.cursor());
     let view = TextEditView::new(Overflow::Scroll);
 
-    let (y, _) = view.scroll(body, &stat);
-
-    // TODO: Don't pointlessy render all markers.
-    let markers: Vec<_> = (1..=state.content().rows())
-        .map(|n| {
-            let style = if n == state.cursor().to_row(state.content()) + 1 {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default()
-            };
-
-            Spans::from(vec![Span::styled(n.to_string(), style), Span::raw(" ")])
-        })
-        .collect();
-    let markers = Paragraph::new(markers)
-        .alignment(Alignment::Right)
-        .scroll((y, 0))
-        .style(Style::default().fg(Color::Black));
-
-    view.focus(body, frame, &stat);
-
-    frame.render_widget(markers, ruler);
-    frame.render_stateful_widget(view, body, &mut stat);
+    view.focus(area, frame, &stat);
+    frame.render_stateful_widget(view, area, &mut stat);
 }
 
 fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
@@ -73,15 +45,16 @@ fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor)
 }
 
 fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
-    let mode = match state.mode() {
-        Mode::Normal { .. } => "Normal",
-        Mode::Edit { .. } => "Edit",
-        Mode::Select { .. } => "Select",
-        Mode::Query { prompt, .. } => prompt,
-        Mode::Operator { prompt, .. } => prompt,
-    };
+    // let mode = match state.mode() {
+    //     Mode::Normal { .. } => "Normal",
+    //     Mode::Edit { .. } => "Edit",
+    //     Mode::Select { .. } => "Select",
+    //     Mode::Query { prompt, .. } => prompt,
+    //     Mode::Operator { prompt, .. } => prompt,
+    // };
 
-    let position = state.cursor().to_col(state.content()).to_string();
+    let mode = "Normal";
+    let position = state.cursor().to_col(state.buffer()).to_string();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -103,25 +76,25 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(mode, chunks[0]);
     frame.render_widget(position, chunks[2]);
 
-    if let Mode::Query { content, cursor, .. } = state.mode() {
-        let mut stat = TextEditState::new(content, *cursor);
-        let view = TextEditView::new(Overflow::Scroll);
+    // if let Mode::Query { buffer, cursor, .. } = state.mode() {
+    //     let mut stat = TextEditState::new(buffer, *cursor);
+    //     let view = TextEditView::new(Overflow::Scroll);
 
-        view.focus(chunks[1], frame, &stat);
-        frame.render_stateful_widget(view, chunks[1], &mut stat);
-    }
+    //     view.focus(chunks[1], frame, &stat);
+    //     frame.render_stateful_widget(view, chunks[1], &mut stat);
+    // }
 }
 
 fn draw<B>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Error>>
 where
     B: Backend + io::Write,
 {
-    match state.mode() {
-        Mode::Edit { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
-        Mode::Query { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::BlinkingBar)?,
+    // match state.mode() {
+        // Mode::Edit { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
+        // Mode::Query { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::BlinkingBar)?,
 
-        _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
-    }
+        // _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
+    // }
 
     terminal.draw(|frame| {
         let horizontal = Layout::default()
@@ -152,56 +125,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = Editor::default();
-    let mut lua = Lua::new();
+    let mut world = World::default();
 
     loop {
-        draw(&mut terminal, &state)?;
+        draw(&mut terminal, world.editor())?;
 
         if let Some(key) = io::stdin().keys().next() {
-            use termion::event::Key::{Char, Ctrl, Down, Esc, Left, Right, Up};
-            use Mode::{Edit, Normal, Query};
-
             let key = key?;
 
             if matches!(key, Ctrl('d')) {
                 break;
             }
 
-            let action = match (state.mode(), key) {
-                (Edit { .. }, Char(ch)) => Action::Input(ch),
-                (Edit { .. }, Esc) => Action::Escape { backward: true },
-
-                (Query { .. }, Char(ch)) => Action::Input(ch),
-                (Query { .. }, Esc) => Action::Escape { backward: false },
-
-                (Normal { .. }, Char('i')) => Action::ToInsert { advance: false },
-                (Normal { .. }, Char('a')) => Action::ToInsert { advance: true },
-
-                (Normal { .. }, Char('o')) => Action::ToInsertBelow,
-                (Normal { .. }, Char('O')) => Action::ToInsertAbove,
-
-                (Normal { .. }, Char(';')) => Action::ToEval {},
-
-                (_, Char('s')) => Action::ToSurround {},
-
-                (_, Char('0')) => Action::TextObject(TextObject::Bol),
-
-                (_, Char('W')) => Action::TextObject(TextObject::Head),
-                (_, Char('E')) => Action::TextObject(TextObject::Tail),
-
-                (_, Char('{')) => Action::TextObject(TextObject::Paragraph { advance: false }),
-                (_, Char('}')) => Action::TextObject(TextObject::Paragraph { advance: true }),
-
-                (_, Up) => Action::TextObject(TextObject::Up),
-                (_, Down) => Action::TextObject(TextObject::Down),
-                (_, Left) => Action::TextObject(TextObject::Left),
-                (_, Right) => Action::TextObject(TextObject::Right),
-
-                _ => Action::Escape { backward: false },
-            };
-
-            handle_key(&mut state, &mut lua, action)?;
+            if let Char(ch) = key {
+                world.advance(ch);
+            }
         }
     }
 

@@ -2,7 +2,7 @@ use crate::buffer::Buffer;
 use crate::cursor::{Codepoint, Cursor, Iter};
 
 pub struct Tail<'a> {
-    chars: Codepoint<'a>,
+    iter: Codepoint<'a>,
     buffer: &'a Buffer,
 }
 
@@ -11,12 +11,16 @@ fn is_word_tail(cursor: Cursor, buffer: &Buffer) -> bool {
         && cursor
             .next::<Codepoint>(buffer)
             .and_then(|cursor| buffer.get(cursor.index))
-            .map_or(true, |ch| ch.is_whitespace())
+            .map_or(true, char::is_whitespace)
 }
 
 impl<'a> Iter<'a> for Tail<'a> {
     fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
-        Self { buffer, chars: Codepoint::new(cursor, buffer) }
+        Self { buffer, iter: Codepoint::new(cursor, buffer) }
+    }
+
+    fn at(&self) -> Self::Item {
+        self.iter.at()
     }
 }
 
@@ -25,14 +29,14 @@ impl Iterator for Tail<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let buffer = self.buffer;
-        self.chars.find(|&cursor| is_word_tail(cursor, buffer))
+        self.iter.find(|&cursor| is_word_tail(cursor, buffer))
     }
 }
 
 impl DoubleEndedIterator for Tail<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let buffer = self.buffer;
-        self.chars.rfind(|&cursor| is_word_tail(cursor, buffer))
+        self.iter.rfind(|&cursor| is_word_tail(cursor, buffer))
     }
 }
 

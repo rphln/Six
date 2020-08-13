@@ -6,33 +6,36 @@ pub struct Bounded<'a> {
     buffer: &'a Buffer,
 }
 
-fn has_line_break(cursor: Cursor, buffer: &Buffer) -> bool {
-    buffer.get(cursor.index).map_or(false, |ch| ch == '\n')
+fn is_boundary(cursor: Cursor, buffer: &Buffer) -> bool {
+    buffer.get(cursor.index).map_or(true, |ch| ch == '\n')
 }
 
 impl<'a> Iter<'a> for Bounded<'a> {
     fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
         Self { buffer, chars: Codepoint::new(cursor, buffer) }
     }
+
+    fn at(&self) -> Self::Item {
+        self.chars.at()
+    }
 }
 
 impl Iterator for Bounded<'_> {
     type Item = Cursor;
 
-    /// Moves a `Cursor` forwards inside a line by up to the specified amount.
     fn next(&mut self) -> Option<Self::Item> {
-        match self.chars.next()? {
-            cursor if has_line_break(cursor, self.buffer) => None,
-            cursor => Some(cursor),
+        if is_boundary(self.at(), self.buffer) {
+            None
+        } else {
+            self.chars.next().or_else(|| Some(Cursor::eof(self.buffer)))
         }
     }
 }
 
 impl DoubleEndedIterator for Bounded<'_> {
-    /// Moves a `Cursor` forwards inside a line by up to the specified amount.
     fn next_back(&mut self) -> Option<Self::Item> {
         match self.chars.next_back()? {
-            cursor if has_line_break(cursor, self.buffer) => None,
+            cursor if is_boundary(cursor, self.buffer) => None,
             cursor => Some(cursor),
         }
     }

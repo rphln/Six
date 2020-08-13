@@ -2,13 +2,17 @@ use crate::buffer::Buffer;
 use crate::cursor::{Codepoint, Cursor, Iter};
 
 pub struct Paragraph<'a> {
-    chars: Codepoint<'a>,
+    iter: Codepoint<'a>,
     buffer: &'a Buffer,
 }
 
 impl<'a> Iter<'a> for Paragraph<'a> {
     fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
-        Self { buffer, chars: Codepoint::new(cursor, buffer) }
+        Self { buffer, iter: Codepoint::new(cursor, buffer) }
+    }
+
+    fn at(&self) -> Self::Item {
+        self.iter.at()
     }
 }
 
@@ -18,7 +22,7 @@ impl Iterator for Paragraph<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         todo!()
         // let buffer = self.buffer;
-        // self.chars.find(|&cursor| {
+        // self.iter.find(|&cursor| {
         //     let p = cursor.index.checked_sub(2).and_then(|idx| buffer.get(idx..=idx));
         //     let q = cursor.index.checked_sub(1).and_then(|idx| buffer.get(idx..=idx));
         //     let r = buffer.get(cursor.index..=cursor.index);
@@ -34,7 +38,7 @@ impl DoubleEndedIterator for Paragraph<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         todo!()
         // let buffer = self.buffer;
-        // self.chars.rfind(|&cursor| {
+        // self.iter.rfind(|&cursor| {
         //     let idx = cursor.to_index(buffer);
 
         //     let p = idx.checked_sub(1).and_then(|idx| buffer.get(idx));

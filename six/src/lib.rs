@@ -1,6 +1,9 @@
 //! Six - A Vi-like toy text editor.
 
 #![deny(clippy::all, clippy::pedantic)]
+#![feature(generators)]
+#![feature(generator_trait)]
+#![feature(never_type)]
 
 #[macro_use]
 extern crate derivative;

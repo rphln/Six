@@ -1,4 +1,4 @@
-use std::ops::{Index, RangeBounds};
+use std::ops::{Deref, RangeBounds};
 
 #[derive(Debug, Clone, Default)]
 pub struct Buffer(String);
@@ -10,7 +10,7 @@ impl Buffer {
     }
 
     /// Replaces the specified range in the buffer with the given string.
-    pub fn edit(&mut self, range: impl RangeBounds<usize>, text: &str) {
+    pub fn replace_range(&mut self, range: impl RangeBounds<usize>, text: &str) {
         self.0.replace_range(range, text.as_ref());
     }
 
@@ -21,37 +21,31 @@ impl Buffer {
 
     /// Deletes the text in the specified range.
     pub fn delete(&mut self, range: impl RangeBounds<usize>) {
-        self.edit(range, "")
+        self.replace_range(range, "")
     }
 
     /// Convers this `Buffer` to a string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        self.deref()
     }
 
     /// Returns the number of characters in the buffer.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns whether the buffer is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the `char` at `idx`.
+    #[must_use]
     pub fn get(&self, idx: usize) -> Option<char> {
-        self.0[idx..].chars().next()
-    }
-
-    /// Returns the number of lines in the buffer.
-    pub fn rows(&self) -> usize {
-        self.lines().count()
-    }
-
-    /// Returns the number of characters in the specified line, excluding the line break.
-    pub fn cols_at(&self, line: usize) -> usize {
-        self.lines().nth(line).expect("Attempt to index past end of `Buffer`").chars().count()
+        self[idx..].chars().next()
     }
 }
 
@@ -61,26 +55,11 @@ impl From<&str> for Buffer {
     }
 }
 
-impl<R: RangeBounds<usize>> Index<R> for Buffer {
-    type Output = str;
+impl Deref for Buffer {
+    type Target = str;
 
-    fn index(&self, index: R) -> &str {
-        use std::ops::Bound::{Excluded, Included, Unbounded};
-
-        let buf = self.as_str();
-
-        match (index.start_bound(), index.end_bound()) {
-            (Included(&p), Included(&q)) => &buf[p..=q],
-            (Included(&p), Excluded(&q)) => &buf[p..q],
-            (Included(&p), Unbounded) => &buf[p..],
-
-            (Excluded(&p), Included(&q)) => &buf[(p + 1)..=q],
-            (Excluded(&p), Excluded(&q)) => &buf[(p + 1)..q],
-            (Excluded(&p), Unbounded) => &buf[(p + 1)..],
-
-            (Unbounded, Included(&q)) => &buf[..=q],
-            (Unbounded, Excluded(&q)) => &buf[..q],
-            (Unbounded, Unbounded) => &buf[..],
-        }
+    #[inline]
+    fn deref(&self) -> &str {
+        self.0.deref()
     }
 }

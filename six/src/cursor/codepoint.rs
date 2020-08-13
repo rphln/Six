@@ -10,6 +10,10 @@ impl<'s> Iter<'s> for Codepoint<'s> {
     fn new(cursor: Cursor, buffer: &'s Buffer) -> Self {
         Self { cursor, buffer }
     }
+
+    fn at(&self) -> Self::Item {
+        self.cursor
+    }
 }
 
 impl Iterator for Codepoint<'_> {
