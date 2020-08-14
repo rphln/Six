@@ -6,7 +6,8 @@ edition = "2018"
 license = "LGPL-3.0-or-later"
 
 [dependencies]
-six = { path = "../six" }
-
 tui = { git = "https://github.com/fdehau/tui-rs" }
 termion = "1.5"
+
+[dependencies.six]
+path = "../six"

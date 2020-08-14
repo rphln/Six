@@ -27,7 +27,7 @@ impl Buffer {
     /// Convers this `Buffer` to a string.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.deref()
+        &*self
     }
 
     /// Returns the number of characters in the buffer.
@@ -60,6 +60,6 @@ impl Deref for Buffer {
 
     #[inline]
     fn deref(&self) -> &str {
-        self.0.deref()
+        &*self.0
     }
 }

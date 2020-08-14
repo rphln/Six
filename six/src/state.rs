@@ -1,105 +1,198 @@
 use std::fmt::Debug;
 
 use crate::buffer::Buffer;
-use crate::cursor::{Bounded, Cursor, Iter};
+use crate::cursor::{Bounded, Codepoint, Cursor, Iter};
 
-type Event = char;
+/// An event.
+// TODO: Replace this with a bitmask.
+pub enum Event<'a> {
+    Esc,
 
-/// The editor.
-#[derive(Debug, Default)]
-pub struct World {
-    /// The shared state.
-    editor: Editor,
+    Backspace,
+    Delete,
 
-    /// The editor mode.
-    mode: Option<Box<dyn Mode>>,
+    Char(char),
+
+    Ctrl(&'a Event<'a>),
+    Meta(&'a Event<'a>),
+    Shift(&'a Event<'a>),
 }
 
-/// The editor state.
-#[derive(Debug, Default)]
+// TODO: Replace with a trait alias once it stabilizes.
+pub trait Callback<Arg>: FnOnce(Mode, &mut State, Arg) -> Mode + Send + Sync {}
+
+/// An modal editor.
+#[derive(Debug, Derivative)]
+#[derivative(Default)]
 pub struct Editor {
-    /// The editor buffer.
+    /// The state shared between modes.
+    state: State,
+
+    /// The current mode.
+    mode: Mode,
+}
+
+/// The state state.
+#[derive(Debug, Default)]
+pub struct State {
+    /// The state buffer.
     buffer: Buffer,
 
     /// The cursor position.
     cursor: Cursor,
 }
 
-/// An editor mode.
-pub trait Mode: Debug {
-    /// Advances the editor state by handling an event.
-    fn advance(&self, editor: &mut Editor, event: Event) -> Box<dyn Mode>;
-}
+/// An state mode.
+#[derive(Derivative)]
+#[derivative(Default, Debug)]
+pub enum Mode {
+    /// The default editor mode.
+    #[derivative(Default)]
+    Normal,
 
-#[derive(Debug)]
-pub struct Normal;
+    /// The text insertion mode.
+    Insert,
 
-impl World {
-    /// Returns a reference to the editor state.
-    pub fn editor(&self) -> &Editor {
-        &self.editor
-    }
-
-    /// Advances the editor state by handling an event.
-    pub fn advance(&mut self, event: Event) {
-        self.mode = self.mode.take().expect("mode").advance(&mut self.editor, event).into();
-    }
+    /// Queries the user for a text range.
+    Select {
+        /// The fixed point of the selection.
+        anchor: Cursor,
+    },
 }
 
 impl Editor {
+    /// Returns a reference to the state inner state.
+    #[must_use]
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    /// Returns a reference to the state mode.
+    #[must_use]
+    pub fn mode(&self) -> &Mode {
+        &self.mode
+    }
+
+    /// Advances the state state by handling an event.
+    pub fn advance(&mut self, event: Event) {
+        self.mode = std::mem::take(&mut self.mode).advance(&mut self.state, event);
+    }
+}
+
+impl State {
     /// Returns the cursor position.
+    #[must_use]
     pub fn cursor(&self) -> Cursor {
         self.cursor
     }
 
     /// Returns a reference to the buffer.
+    #[must_use]
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
     }
 
+    pub fn insert(&mut self, ch: char) {
+        self.buffer.insert(self.cursor.index, ch)
+    }
+
     /// Moves the cursor forward up to the specified units according to the specified unit.
     pub fn forward<'a, M: Iter<'a>>(&'a mut self, n: usize) {
-        self.cursor = self.cursor.iter::<M>(&self.buffer).take(n).last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.buffer)
+            .take(n)
+            .last()
+            .unwrap_or_else(|| Cursor::eof(&self.buffer));
     }
 
     /// Moves the cursor forward the last position according to the specified unit.
     pub fn last<'a, M: Iter<'a>>(&'a mut self) {
-        self.cursor = self.cursor.iter::<M>(&self.buffer).last().unwrap_or(self.cursor);
+        self.cursor =
+            self.cursor.iter::<M>(&self.buffer).last().unwrap_or_else(|| Cursor::eof(&self.buffer));
     }
 
     /// Moves the cursor backward up to the specified units according to the specified unit.
     pub fn backward<'a, M: Iter<'a>>(&'a mut self, n: usize) {
-        self.cursor =
-            self.cursor.iter::<M>(&self.buffer).rev().take(n).last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.buffer)
+            .rev()
+            .take(n)
+            .last()
+            .unwrap_or_else(|| Cursor::eof(&self.buffer));
     }
 
     /// Moves the cursor backward the last position according to the specified unit.
     pub fn first<'a, M: Iter<'a>>(&'a mut self) {
-        self.cursor = self.cursor.iter::<M>(&self.buffer).rev().last().unwrap_or(self.cursor);
+        self.cursor = self
+            .cursor
+            .iter::<M>(&self.buffer)
+            .rev()
+            .last()
+            .unwrap_or_else(|| Cursor::eof(&self.buffer));
     }
 }
 
-impl Mode for Normal {
-    fn advance(&self, editor: &mut Editor, event: Event) -> Box<dyn Mode> {
-        todo!()
+impl Mode {
+    #[must_use]
+    pub fn escape() -> Mode {
+        Mode::Normal
+    }
+
+    #[must_use]
+    pub fn insert() -> Mode {
+        Mode::Insert
+    }
+
+    /// Returns an user-friendly name for the mode.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Mode::Normal { .. } => "Normal",
+            Mode::Insert { .. } => "Insert",
+            Mode::Select { .. } => "Select",
+        }
+    }
+
+    /// Advances the state state by handling an event.
+    pub fn advance(self, state: &mut State, event: Event) -> Mode {
+        use Mode::{Insert, Normal};
+
+        match (self, event) {
+            (Normal, Event::Char('i')) => Mode::insert(),
+            (Normal, Event::Char('a')) => {
+                state.forward::<Codepoint>(1);
+                Mode::insert()
+            },
+
+            (Normal, Event::Char('I')) => {
+                state.first::<Bounded>();
+                Mode::insert()
+            },
+
+            (Normal, Event::Char('A')) => {
+                state.last::<Bounded>();
+                Mode::insert()
+            },
+
+            (mode @ Insert, Event::Char(ch)) => {
+                state.insert(ch);
+                state.forward::<Codepoint>(1);
+                mode
+            },
+
+            (Insert, Event::Esc) => {
+                state.backward::<Bounded>(1);
+                Mode::escape()
+            },
+
+            _ => todo!(),
+        }
     }
 }
 
-// #[derive(Derivative)]
-// #[derivative(Debug, Default)]
 // pub enum Mode {
-//     /// The default editor mode.
-//     #[derivative(Default)]
-//     Normal,
-
-//     /// The text input mode.
-//     Edit,
-
-//     /// Queries the user for a text range.
-//     Select {
-//         /// The fixed point of the selection.
-//         anchor: Cursor,
-//     },
 
 //     /// Queries the user for a text object and applies an operation.
 //     Pending {

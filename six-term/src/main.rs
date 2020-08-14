@@ -1,35 +1,78 @@
 //! Six - A Vi-like toy text editor.
 
 #![deny(clippy::all, clippy::pedantic)]
-#![feature(generator_trait)]
 
 use std::error::Error;
 use std::io;
-use std::ops::Generator;
-use std::pin::Pin;
+use std::marker::PhantomData;
 
-use tui::{
-    backend::{Backend, TermionBackend},
-    layout::{Alignment, Rect},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::{Span, Spans},
-    widgets::{Paragraph, Wrap},
-    Frame, Terminal,
-};
+use tui::backend::{Backend, TermionBackend};
+use tui::buffer::Buffer;
+use tui::layout::{Alignment, Rect};
+use tui::layout::{Constraint, Direction, Layout};
+use tui::style::{Color, Style};
+use tui::text::Span;
+use tui::widgets::{Paragraph, StatefulWidget, Widget, Wrap};
+use tui::{Frame, Terminal};
 
-use termion::event::Key::{Char, Ctrl};
+use termion::event::Key;
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
-use six::state::{Editor, Mode, World};
+use six::{Editor, Event as Ev, Mode};
 
-mod buffer_view;
+#[derive(Default)]
+pub struct TextEditState<'a> {
+    buffer: &'a str,
 
-use crate::buffer_view::{Overflow, TextEditState, TextEditView};
+    col: u16,
+    row: u16,
+}
+
+impl<'a> From<&'a Editor> for TextEditState<'a> {
+    fn from(state: &'a Editor) -> TextEditState<'a> {
+        let cursor = state.state().cursor();
+        let buffer = state.state().buffer();
+
+        let col = cursor.to_col(buffer) as u16;
+        let row = cursor.to_row(buffer) as u16;
+
+        Self { col, row, buffer: buffer.as_str() }
+    }
+}
+
+#[derive(Default)]
+pub struct TextEditView<'a> {
+    phantom: PhantomData<&'a ()>,
+}
+
+impl TextEditView<'_> {
+    #[must_use]
+    pub fn scroll(&self, area: Rect, state: &TextEditState) -> (u16, u16) {
+        let x = state.col.saturating_sub(area.width - 1);
+        let y = state.row.saturating_sub(area.height - 1);
+
+        (x, y)
+    }
+
+    pub fn focus<B: Backend>(&self, area: Rect, frame: &mut Frame<B>, state: &TextEditState) {
+        let x = area.x + state.col.min(area.width - 1);
+        let y = area.y + state.row.min(area.height - 1);
+
+        frame.set_cursor(x, y);
+    }
+}
+
+impl<'a> StatefulWidget for TextEditView<'a> {
+    type State = TextEditState<'a>;
+
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        Paragraph::new(state.buffer).scroll(self.scroll(area, state)).render(area, buf)
+    }
+}
 
 fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
-    let mut stat = TextEditState::new(state.buffer(), state.cursor());
-    let view = TextEditView::new(Overflow::Scroll);
+    let mut stat = TextEditState::from(state);
+    let view = TextEditView::default();
 
     view.focus(area, frame, &stat);
     frame.render_stateful_widget(view, area, &mut stat);
@@ -45,16 +88,8 @@ fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor)
 }
 
 fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
-    // let mode = match state.mode() {
-    //     Mode::Normal { .. } => "Normal",
-    //     Mode::Edit { .. } => "Edit",
-    //     Mode::Select { .. } => "Select",
-    //     Mode::Query { prompt, .. } => prompt,
-    //     Mode::Operator { prompt, .. } => prompt,
-    // };
-
-    let mode = "Normal";
-    let position = state.cursor().to_col(state.buffer()).to_string();
+    let mode = state.mode().name();
+    let position = state.state().cursor().to_col(state.state().buffer()).to_string();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -89,12 +124,12 @@ fn draw<B>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Err
 where
     B: Backend + io::Write,
 {
-    // match state.mode() {
-        // Mode::Edit { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
-        // Mode::Query { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::BlinkingBar)?,
-
-        // _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
-    // }
+    match state.mode() {
+        Mode::Insert { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
+        // Mode::Query { .. } => write!(terminal.backend_mut(), "{}",
+        // termion::cursor::BlinkingBar)?,
+        _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
+    }
 
     terminal.draw(|frame| {
         let horizontal = Layout::default()
@@ -118,27 +153,26 @@ where
 
 fn main() -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout().into_raw_mode()?;
+
     let stdout = MouseTerminal::from(stdout);
     let stdout = AlternateScreen::from(stdout);
 
     let backend = TermionBackend::new(stdout);
 
     let mut terminal = Terminal::new(backend)?;
-
-    let mut world = World::default();
+    let mut editor = Editor::default();
 
     loop {
-        draw(&mut terminal, world.editor())?;
+        draw(&mut terminal, &editor)?;
 
-        if let Some(key) = io::stdin().keys().next() {
-            let key = key?;
+        if let Some(event) = io::stdin().keys().next() {
+            match event? {
+                Key::Ctrl('d') => break,
 
-            if matches!(key, Ctrl('d')) {
-                break;
-            }
+                Key::Char(ch) => editor.advance(Ev::Char(ch)),
+                Key::Esc => editor.advance(Ev::Esc),
 
-            if let Char(ch) = key {
-                world.advance(ch);
+                _ => todo!(),
             }
         }
     }
