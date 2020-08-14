@@ -28,15 +28,18 @@ pub struct TextEditState<'a> {
     row: u16,
 }
 
-impl<'a> From<&'a Editor> for TextEditState<'a> {
-    fn from(state: &'a Editor) -> TextEditState<'a> {
-        let cursor = state.state().cursor();
-        let buffer = state.state().buffer();
-
+impl<'a> TextEditState<'a> {
+    fn new(buffer: &'a six::Buffer, cursor: six::Cursor) -> Self {
         let col = cursor.to_col(buffer) as u16;
         let row = cursor.to_row(buffer) as u16;
 
         Self { col, row, buffer: buffer.as_str() }
+    }
+}
+
+impl<'a> From<&'a Editor> for TextEditState<'a> {
+    fn from(state: &'a Editor) -> TextEditState<'a> {
+        TextEditState::new(state.state().buffer(), state.state().cursor())
     }
 }
 
@@ -111,13 +114,13 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(mode, chunks[0]);
     frame.render_widget(position, chunks[2]);
 
-    // if let Mode::Query { buffer, cursor, .. } = state.mode() {
-    //     let mut stat = TextEditState::new(buffer, *cursor);
-    //     let view = TextEditView::new(Overflow::Scroll);
+    if let Mode::Query { buffer, cursor, .. } = state.mode() {
+        let mut stat = TextEditState::new(buffer, *cursor);
+        let view = TextEditView::default();
 
-    //     view.focus(chunks[1], frame, &stat);
-    //     frame.render_stateful_widget(view, chunks[1], &mut stat);
-    // }
+        view.focus(chunks[1], frame, &stat);
+        frame.render_stateful_widget(view, chunks[1], &mut stat);
+    }
 }
 
 fn draw<B>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Error>>
@@ -172,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Key::Char(ch) => editor.advance(Ev::Char(ch)),
                 Key::Esc => editor.advance(Ev::Esc),
 
-                _ => todo!(),
+                _ => continue,
             }
         }
     }
