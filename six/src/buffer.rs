@@ -1,4 +1,6 @@
-use std::ops::{Deref, RangeBounds};
+use std::ops::RangeBounds;
+
+// TODO: Replace with a piece table or something.
 
 #[derive(Debug, Clone, Default)]
 pub struct Buffer(String);
@@ -15,8 +17,8 @@ impl Buffer {
     }
 
     /// Inserts a character into this `Buffer` at the specified position.
-    pub fn insert(&mut self, idx: usize, ch: char) {
-        self.0.insert(idx, ch);
+    pub fn insert(&mut self, idx: impl Into<usize>, ch: char) {
+        self.0.insert(idx.into(), ch);
     }
 
     /// Deletes the text in the specified range.
@@ -27,7 +29,7 @@ impl Buffer {
     /// Convers this `Buffer` to a string.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &*self
+        self.0.as_str()
     }
 
     /// Returns the number of characters in the buffer.
@@ -44,22 +46,13 @@ impl Buffer {
 
     /// Returns the `char` at `idx`.
     #[must_use]
-    pub fn get(&self, idx: usize) -> Option<char> {
-        self[idx..].chars().next()
+    pub fn get(&self, idx: impl Into<usize>) -> Option<char> {
+        self.0[idx.into()..].chars().next()
     }
 }
 
 impl From<&str> for Buffer {
     fn from(text: &str) -> Self {
         Self(text.into())
-    }
-}
-
-impl Deref for Buffer {
-    type Target = str;
-
-    #[inline]
-    fn deref(&self) -> &str {
-        &*self.0
     }
 }

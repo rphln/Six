@@ -9,7 +9,8 @@ pub struct Tail<'a> {
 fn is_word_tail(cursor: Cursor, buffer: &Buffer) -> bool {
     buffer.get(cursor.index).map_or(false, |ch| !ch.is_whitespace())
         && cursor
-            .next::<Codepoint>(buffer)
+            .iter::<Codepoint>(buffer)
+            .next()
             .and_then(|cursor| buffer.get(cursor.index))
             .map_or(true, char::is_whitespace)
 }
@@ -40,39 +41,18 @@ impl DoubleEndedIterator for Tail<'_> {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::Tail;
-//     use crate::{
-//         cursor::{Col, Row},
-//         Buffer, Cursor,
-//     };
+#[cfg(test)]
+mod tests {
+    use super::Tail;
+    use crate::{Buffer, Cursor};
 
-//     static LOREM: &Buffer = include_str!("../../assets/lorem.txt");
+    static LOREM: &str = include_str!("../../assets/lorem.txt");
 
-//     #[test]
-//     fn test_next() {
-//         let buffer = Buffer::from(LOREM);
-//         let mut iter = Cursor::new(Row(0), Col(0)).iter::<Tail>(&buffer);
+    #[test]
+    fn test_iter() {
+        let buffer = Buffer::from(LOREM);
+        let codepoints = Cursor::new(0).iter::<Tail>(&buffer).collect::<Vec<_>>();
 
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(0), Col(2)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(0), Col(6)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(0), Col(10)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(1), Col(2)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(1), Col(7)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(1), Col(12)));
-
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(3), Col(4)));
-
-//         let mut iter = Cursor::new(Row(8), Col(0)).iter::<Tail>(&buffer);
-
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(9), Col(6)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(9), Col(12)));
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(10), Col(5)));
-
-//         let mut iter = Cursor::new(Row(15), Col(38)).iter::<Tail>(&buffer);
-
-//         assert_eq!(iter.next().expect("next"), Cursor::new(Row(15), Col(47)));
-//         assert_eq!(iter.next(), None);
-//     }
-// }
+        assert_eq!(codepoints, vec![]);
+    }
+}

@@ -8,7 +8,8 @@ pub struct Head<'a> {
 
 fn is_word_head(cursor: Cursor, buffer: &Buffer) -> bool {
     cursor
-        .prev::<Codepoint>(buffer)
+        .iter::<Codepoint>(buffer)
+        .next_back()
         .and_then(|cursor| buffer.get(cursor.index))
         .map_or(true, char::is_whitespace)
         && buffer.get(cursor.index).map_or(false, |ch| !ch.is_whitespace())

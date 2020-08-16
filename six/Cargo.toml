@@ -10,3 +10,7 @@ exclude = ["assets/**"]
 rlua = "0.17.0"
 derivative = "2.1.1"
 unicode-width = "0.1.5"
+bitflags = "1.0"
+
+# TODO: Remove this.
+maplit = "1.0.2"

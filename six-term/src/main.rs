@@ -15,10 +15,10 @@ use tui::text::Span;
 use tui::widgets::{Paragraph, StatefulWidget, Widget, Wrap};
 use tui::{Frame, Terminal};
 
-use termion::event::Key;
+use termion::event;
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
-use six::{Editor, Event as Ev, Mode};
+use six::{state::Modifiers, Editor, Key, Mode};
 
 #[derive(Default)]
 pub struct TextEditState<'a> {
@@ -170,10 +170,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if let Some(event) = io::stdin().keys().next() {
             match event? {
-                Key::Ctrl('d') => break,
+                event::Key::Ctrl('d') => break,
 
-                Key::Char(ch) => editor.advance(Ev::Char(ch)),
-                Key::Esc => editor.advance(Ev::Esc),
+                event::Key::Char(ch) => editor.handle_key(Some(Key::Char(Modifiers::NONE, ch))),
+                event::Key::Esc => editor.handle_key(Some(Key::Esc)),
+
+                event::Key::Left => editor.handle_key(Some(Key::Left)),
+                event::Key::Right => editor.handle_key(Some(Key::Right)),
+                event::Key::Up => editor.handle_key(Some(Key::Up)),
+                event::Key::Down => editor.handle_key(Some(Key::Down)),
 
                 _ => continue,
             }
