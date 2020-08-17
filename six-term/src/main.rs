@@ -39,7 +39,7 @@ impl<'a> TextEditState<'a> {
 
 impl<'a> From<&'a Editor> for TextEditState<'a> {
     fn from(state: &'a Editor) -> TextEditState<'a> {
-        TextEditState::new(state.buffer(), state.cursor())
+        TextEditState::new(state.content(), state.cursor())
     }
 }
 
@@ -92,7 +92,7 @@ fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor)
 
 fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let mode = state.mode().name();
-    let position = state.cursor().to_col(state.buffer()).to_string();
+    let position = state.cursor().to_col(state.content()).to_string();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -115,7 +115,7 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(position, chunks[2]);
 
     if let Mode::Query { buffer, .. } = state.mode() {
-        let mut stat = TextEditState::new(buffer.buffer(), buffer.cursor());
+        let mut stat = TextEditState::new(buffer.as_str(), buffer.cursor());
         let view = TextEditView::default();
 
         view.focus(chunks[1], frame, &stat);
@@ -174,6 +174,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 event::Key::Char(ch) => editor.handle_key(Key::Char(ch)),
                 event::Key::Esc => editor.handle_key(Key::Esc),
+
+                event::Key::Delete => editor.handle_key(Key::Delete),
+                event::Key::Backspace => editor.handle_key(Key::Backspace),
 
                 event::Key::Left => editor.handle_key(Key::Left),
                 event::Key::Right => editor.handle_key(Key::Right),

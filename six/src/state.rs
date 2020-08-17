@@ -1,43 +1,40 @@
 use std::ops::{Bound, RangeBounds};
 
-use rlua::Lua;
+use rlua::{Lua, UserData, UserDataMethods};
 
 use crate::cursor::{Codepoint, Cursor, Iter};
 use crate::event::Key;
-use crate::mode::{Advance, Keymap, Mode, Operation};
+use crate::mode::{Advance, Context, Keymap, Mode, Operation};
 
 /// An modal editor.
-#[derive(Debug, Default)]
-pub struct Editor {
-    /// The current mode.
-    mode: Mode,
-
-    /// The mutable state of the editor.
-    state: State,
-
-    /// The editor context.
-    context: Context,
-}
-
 #[derive(Default, Derivative)]
 #[derivative(Debug)]
-pub struct Context {
-    /// Lua state.
+pub struct Editor {
+    /// The active mode.
+    mode: Mode,
+
+    /// The text buffer.
+    buffer: Buffer,
+
+    /// The editor message log.
+    messages: Vec<String>,
+
+    /// The Lua engine.
     #[derivative(Debug = "ignore")]
     lua: Lua,
 }
 
-/// The mutable state of an editor.
-#[derive(Debug, Default)]
-pub struct State {
-    /// The text buffer.
-    buffer: String,
+/// The mutable buffer of an editor.
+#[derive(Clone, Debug, Default)]
+pub struct Buffer {
+    /// The text content.
+    content: String,
 
     /// The cursor position.
     cursor: Cursor,
 }
 
-impl State {
+impl Buffer {
     /// Returns the cursor position.
     #[inline]
     #[must_use]
@@ -52,16 +49,16 @@ impl State {
         std::mem::replace(&mut self.cursor, cursor)
     }
 
-    /// Returns a reference to the buffer contents.
+    /// Returns a reference to buffer contents.
     #[inline]
     #[must_use]
-    pub fn buffer(&self) -> &str {
-        self.buffer.as_str()
+    pub fn as_str(&self) -> &str {
+        self.content.as_str()
     }
 
     /// Inserts a character at the specified cursor position.
     pub fn insert(&mut self, ch: char, at: Cursor) {
-        self.buffer.insert(at.offset(), ch);
+        self.content.insert(at.offset(), ch);
     }
 
     /// Inserts a character at the cursor position, and then moves the cursor forward.
@@ -74,7 +71,7 @@ impl State {
     ///
     /// Returns the previous position on success.
     pub fn forward<'a, It: Iter<'a>>(&'a mut self) -> Option<Cursor> {
-        let cursor = self.cursor.forward::<It>(self.buffer.as_str())?;
+        let cursor = self.cursor.forward::<It>(self.content.as_str())?;
         std::mem::replace(&mut self.cursor, cursor).into()
     }
 
@@ -82,10 +79,13 @@ impl State {
     ///
     /// Returns the previous position on success.
     pub fn backward<'a, It: Iter<'a>>(&'a mut self) -> Option<Cursor> {
-        let cursor = self.cursor.backward::<It>(self.buffer.as_str())?;
+        let cursor = self.cursor.backward::<It>(self.content.as_str())?;
         std::mem::replace(&mut self.cursor, cursor).into()
     }
 
+    /// Replaces the text in a range.
+    ///
+    /// The length of the range can differ from the replacement's.
     pub fn edit(&mut self, text: &str, range: impl RangeBounds<Cursor>) {
         use Bound::{Excluded, Included, Unbounded};
 
@@ -101,12 +101,30 @@ impl State {
             Unbounded => Unbounded,
         };
 
-        self.buffer.replace_range((start, end), text)
+        self.content.replace_range((start, end), text)
+    }
+}
+
+impl UserData for Cursor {}
+
+impl UserData for &mut Buffer {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
+        methods.add_method_mut("insert_at_cursor", |_, state, text: String| {
+            state.edit(text.as_str(), state.cursor..state.cursor);
+            Ok(())
+        });
+
+        methods.add_method("cursor", |_, state, ()| Ok(state.cursor));
+
+        methods.add_method_mut("delete", |_, state, at: Cursor| {
+            state.edit("", at..=at);
+            Ok(())
+        })
     }
 }
 
 impl Editor {
-    /// Returns a reference to the state mode.
+    /// Returns a reference to the buffer mode.
     #[must_use]
     pub fn mode(&self) -> &Mode {
         &self.mode
@@ -116,19 +134,14 @@ impl Editor {
     #[inline]
     #[must_use]
     pub fn cursor(&self) -> Cursor {
-        self.state.cursor()
+        self.buffer.cursor()
     }
 
-    /// Returns a reference to the buffer contents.
+    /// Returns a reference to the content contents.
     #[inline]
     #[must_use]
-    pub fn buffer(&self) -> &str {
-        self.state.buffer()
-    }
-
-    /// Sets the cursor position.
-    pub fn set_cursor(&mut self, cursor: Cursor) {
-        self.state.cursor = cursor
+    pub fn content(&self) -> &str {
+        self.buffer.as_str()
     }
 
     // TODO: Replace `Key` with `Operation`.
@@ -136,6 +149,8 @@ impl Editor {
         // TODO: Replace with a dynamic keymap lookup.
         #[rustfmt::skip]
         let operations = match (self.mode().keymap(), key) {
+            (keymap, Key::Char(ch)) if keymap.intersects(Keymap::INSERT | Keymap::QUERY)     => vec![Operation::Input(ch)],
+
             (keymap, Key::Char('h')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Left],
             (keymap, Key::Char('j')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Down],
             (keymap, Key::Char('k')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Up],
@@ -158,21 +173,21 @@ impl Editor {
             (keymap, Key::Char('s')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Surround],
             (keymap, Key::Char('d')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Delete],
 
+            (keymap, Key::Delete) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY))    => vec![Operation::Delete],
+
             (keymap, Key::Esc) if keymap.intersects(!Keymap::INSERT)                         => vec![Operation::Escape],
 
-            (keymap, Key::Backspace) if keymap.intersects(Keymap::INSERT)                    => vec![Operation::Delete, Operation::Left],
-            (keymap, Key::Delete) if keymap.intersects(Keymap::INSERT)                       => vec![Operation::Delete],
+            (Keymap::INSERT, Key::Backspace)                                                 => vec![Operation::Delete, Operation::Left],
+            (Keymap::INSERT, Key::Delete)                                                    => vec![Operation::Delete, Operation::Right],
+            (Keymap::INSERT, Key::Esc)                                                       => vec![Operation::Escape, Operation::Left],
 
-            (keymap, Key::Esc) if keymap.intersects(Keymap::INSERT)                          => vec![Operation::Escape, Operation::Left],
+            (Keymap::QUERY, Key::Backspace)                                                  => vec![Operation::Left, Operation::Delete],
+            (Keymap::QUERY, Key::Delete)                                                     => vec![Operation::Delete],
 
-            (keymap, Key::Delete) if keymap.intersects(Keymap::all())                        => vec![Operation::Delete],
-
-            (keymap, Key::Down) if keymap.intersects(Keymap::all())                          => vec![Operation::Down],
-            (keymap, Key::Left) if keymap.intersects(Keymap::all())                          => vec![Operation::Left],
-            (keymap, Key::Right) if keymap.intersects(Keymap::all())                         => vec![Operation::Right],
-            (keymap, Key::Up) if keymap.intersects(Keymap::all())                            => vec![Operation::Up],
-
-            (keymap, Key::Char(ch)) if keymap.intersects(Keymap::INSERT | Keymap::QUERY)     => vec![Operation::Input(ch)],
+            (_, Key::Down)                                                                   => vec![Operation::Down],
+            (_, Key::Left)                                                                   => vec![Operation::Left],
+            (_, Key::Right)                                                                  => vec![Operation::Right],
+            (_, Key::Up)                                                                     => vec![Operation::Up],
 
             (_, _)                                                                           => vec![],
         };
@@ -180,17 +195,19 @@ impl Editor {
         self.advance(operations.as_slice())
     }
 
-    /// Advances the state state by handling events.
+    /// Advances the buffer buffer by handling events.
     pub fn advance(&mut self, operations: &[Operation]) {
         let mut mode = std::mem::take(&mut self.mode);
 
         for &operation in operations {
-            match mode.advance(&mut self.state, operation) {
+            let context = Context::new(&mut self.buffer, &mut self.lua, &mut self.messages);
+
+            match mode.advance(context, operation) {
                 Advance::Continue(next) => mode = next,
-                Advance::Stop(next) => {
+                Advance::Halt(next) => {
                     mode = next;
                     break;
-                },
+                }
             }
         }
 
