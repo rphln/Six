@@ -1,581 +1,199 @@
+use std::ops::{Bound, RangeBounds};
 
-use std::fmt::Debug;
-use std::ops::RangeBounds;
+use rlua::Lua;
 
-use crate::buffer::Buffer;
-use crate::cursor::{Bounded, Codepoint, Cursor, Head, Line, Tail};
-
-bitflags! {
-    pub struct Modifiers: u8 {
-        const NONE  = 0;
-
-        const CTRL  = 1 << 1;
-        const SHFT = 1 << 2;
-        const META  = 1 << 3;
-    }
-}
-
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub enum Key {
-    Backspace,
-    Delete,
-    Esc,
-
-    Left,
-    Right,
-    Up,
-    Down,
-
-    Char(Modifiers, char),
-}
-
-impl From<char> for Key {
-    fn from(ch: char) -> Key {
-        Key::Char(Modifiers::NONE, ch)
-    }
-}
-
-impl ToString for Key {
-    fn to_string(&self) -> String {
-        match self {
-            Self::Backspace => "<Back>".to_owned(),
-            Self::Delete => "<Del>".to_owned(),
-            Self::Esc => "<Esc>".to_owned(),
-
-            Self::Left => "<Left>".to_owned(),
-            Self::Right => "<Right>".to_owned(),
-            Self::Up => "<Up>".to_owned(),
-            Self::Down => "<Down>".to_owned(),
-
-            Self::Char(Modifiers::CTRL, ch) => format!("<C-{}>", ch),
-            Self::Char(Modifiers::META, ch) => format!("<M-{}>", ch),
-            Self::Char(Modifiers::SHFT, ch) => format!("<S-{}>", ch),
-
-            Self::Char(Modifiers::NONE, ch) => format!("{}", ch),
-
-            _ => "\u{fffd}".to_owned(),
-        }
-    }
-}
-
-/// An event.
-#[derive(Copy, Clone, Debug)]
-pub enum Event {
-    Escape,
-    Insert,
-
-    Left,
-    Right,
-    Up,
-    Down,
-
-    Backward,
-    Forward,
-
-    Bol,
-    Eol,
-
-    Head { reverse: bool },
-    Tail { reverse: bool },
-
-    Delete,
-    Surround,
-
-    Input(char),
-}
-
-// TODO: Replace with a trait alias once it stabilizes.
-pub trait Callback<Arg>:
-    FnOnce(&mut State, Arg) -> Result<Mode, Mode> + Send + Sync + 'static
-{
-}
-
-impl<Arg, F> Callback<Arg> for F where
-    F: FnOnce(&mut State, Arg) -> Result<Mode, Mode> + Send + Sync + 'static
-{
-}
+use crate::cursor::{Codepoint, Cursor, Iter};
+use crate::event::Key;
+use crate::mode::{Advance, Keymap, Mode, Operation};
 
 /// An modal editor.
-#[derive(Debug, Derivative)]
-#[derivative(Default)]
+#[derive(Debug, Default)]
 pub struct Editor {
-    /// The state shared between modes.
-    state: State,
-
     /// The current mode.
     mode: Mode,
 
-    /// Input queue.
-    queue: Vec<Key>,
+    /// The mutable state of the editor.
+    state: State,
+
+    /// The editor context.
+    context: Context,
 }
 
-/// The state state.
+#[derive(Default, Derivative)]
+#[derivative(Debug)]
+pub struct Context {
+    /// Lua state.
+    #[derivative(Debug = "ignore")]
+    lua: Lua,
+}
+
+/// The mutable state of an editor.
 #[derive(Debug, Default)]
 pub struct State {
-    /// The state buffer.
-    buffer: Buffer,
+    /// The text buffer.
+    buffer: String,
 
     /// The cursor position.
     cursor: Cursor,
 }
 
-bitflags! {
-    pub struct Keymap: u8 {
-        const NORMAL   = 1 << 0;
-        const QUERY    = 1 << 1;
-
-        const INSERT   = 1 << 2;
-        const SELECT   = 1 << 3;
-        const OPERATOR = 1 << 4;
-
-        const INPUT = Self::INSERT.bits | Self::QUERY.bits;
+impl State {
+    /// Returns the cursor position.
+    #[inline]
+    #[must_use]
+    pub fn cursor(&self) -> Cursor {
+        self.cursor
     }
-}
 
-/// An state mode.
-#[derive(Derivative)]
-#[derivative(Default, Debug)]
-pub enum Mode {
-    /// The default editor mode.
-    #[derivative(Default)]
-    Normal,
+    /// Sets the cursor position.
+    ///
+    /// Returns the old value.
+    pub fn set_cursor(&mut self, cursor: Cursor) -> Cursor {
+        std::mem::replace(&mut self.cursor, cursor)
+    }
 
-    /// The text insertion mode.
-    Insert,
+    /// Returns a reference to the buffer contents.
+    #[inline]
+    #[must_use]
+    pub fn buffer(&self) -> &str {
+        self.buffer.as_str()
+    }
 
-    /// Queries the user for a text range.
-    Select {
-        /// The fixed point of the selection.
-        anchor: Cursor,
-    },
+    /// Inserts a character at the specified cursor position.
+    pub fn insert(&mut self, ch: char, at: Cursor) {
+        self.buffer.insert(at.offset(), ch);
+    }
 
-    /// Queries the user for a text object and applies an operation.
-    Operator {
-        /// The operator name.
-        name: &'static str,
+    /// Inserts a character at the cursor position, and then moves the cursor forward.
+    pub fn append(&mut self, ch: char) {
+        self.insert(ch, self.cursor);
+        self.forward::<Codepoint>().expect("forward");
+    }
 
-        /// Operator to be executed.
-        #[derivative(Debug = "ignore")]
-        and_then: Box<dyn Callback<(Cursor, Cursor)>>,
-    },
+    /// Attempts to move the cursor forward over a given metric.
+    ///
+    /// Returns the previous position on success.
+    pub fn forward<'a, It: Iter<'a>>(&'a mut self) -> Option<Cursor> {
+        let cursor = self.cursor.forward::<It>(self.buffer.as_str())?;
+        std::mem::replace(&mut self.cursor, cursor).into()
+    }
 
-    /// Queries the user for a text input and applies an operation.
-    Query {
-        /// The operation name.
-        name: &'static str,
+    /// Attempts to move the cursor backward over a given metric.
+    ///
+    /// Returns the previous position on success.
+    pub fn backward<'a, It: Iter<'a>>(&'a mut self) -> Option<Cursor> {
+        let cursor = self.cursor.backward::<It>(self.buffer.as_str())?;
+        std::mem::replace(&mut self.cursor, cursor).into()
+    }
 
-        /// The buffer of the query.
-        buffer: Buffer,
+    pub fn edit(&mut self, text: &str, range: impl RangeBounds<Cursor>) {
+        use Bound::{Excluded, Included, Unbounded};
 
-        /// Cursor position in the buffer.
-        cursor: Cursor,
+        let start = match range.start_bound() {
+            Included(&s) => Included(s.offset()),
+            Excluded(&s) => Excluded(s.offset()),
+            Unbounded => Unbounded,
+        };
 
-        /// Whether to finish the query.
-        #[derivative(Debug = "ignore")]
-        until: fn(&str, Event) -> bool,
+        let end = match range.end_bound() {
+            Included(&e) => Included(e.offset()),
+            Excluded(&e) => Excluded(e.offset()),
+            Unbounded => Unbounded,
+        };
 
-        /// Function to be called after the input is submitted.
-        #[derivative(Debug = "ignore")]
-        and_then: Box<dyn for<'a> Callback<&'a str>>,
-    },
+        self.buffer.replace_range((start, end), text)
+    }
 }
 
 impl Editor {
-    /// Returns a reference to the state inner state.
-    #[must_use]
-    pub fn state(&self) -> &State {
-        &self.state
-    }
-
     /// Returns a reference to the state mode.
     #[must_use]
     pub fn mode(&self) -> &Mode {
         &self.mode
     }
 
-    /// Returns a slice containing the key queue.
+    /// Returns the cursor position.
+    #[inline]
     #[must_use]
-    pub fn queue(&self) -> &[Key] {
-        self.queue.as_slice()
+    pub fn cursor(&self) -> Cursor {
+        self.state.cursor()
     }
 
-    /// Returns a flag containing the active keymap.
+    /// Returns a reference to the buffer contents.
+    #[inline]
     #[must_use]
-    pub fn keymap(&self) -> Keymap {
-        match self.mode() {
-            Mode::Normal { .. } => Keymap::NORMAL,
-            Mode::Insert { .. } => Keymap::INSERT,
-            Mode::Select { .. } => Keymap::SELECT,
-            Mode::Operator { .. } => Keymap::OPERATOR,
-            Mode::Query { .. } => Keymap::QUERY,
-        }
+    pub fn buffer(&self) -> &str {
+        self.state.buffer()
     }
 
-    pub fn handle_key(&mut self, key: Option<Key>) {
-        if let Some(key) = key {
-            self.queue.push(key);
-        }
+    /// Sets the cursor position.
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        self.state.cursor = cursor
+    }
 
-        macro_rules! map { { $keymap:expr, $($key:expr),+ } => { ($keymap, vec![$($key.into()),+]) } }
+    // TODO: Replace `Key` with `Operation`.
+    pub fn handle_key(&mut self, key: Key) {
+        // TODO: Replace with a dynamic keymap lookup.
+        #[rustfmt::skip]
+        let operations = match (self.mode().keymap(), key) {
+            (keymap, Key::Char('h')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Left],
+            (keymap, Key::Char('j')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Down],
+            (keymap, Key::Char('k')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Up],
+            (keymap, Key::Char('l')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Right],
 
-        macro_rules! insmap { { $($key:expr),+ } => { map!(Keymap::INSERT,  $($key),+) } }
-        macro_rules! allmap { { $($key:expr),+ } => { map!(Keymap::all(),   $($key),+) } }
-        macro_rules! ninmap { { $($key:expr),+ } => { map!(!Keymap::INSERT, $($key),+) } }
-        macro_rules! niqmap { { $($key:expr),+ } => { map!(!Keymap::INPUT,  $($key),+) } }
+            (keymap, Key::Char('W')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Head { reverse: true }],
+            (keymap, Key::Char('w')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Head { reverse: false }],
 
-        let keymap = hashmap! {
-            allmap! { Key::Char(Modifiers::CTRL, 'a') } => vec![Event::Bol],
-            allmap! { Key::Char(Modifiers::CTRL, 'e') } => vec![Event::Eol],
+            (keymap, Key::Char('E')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Tail { reverse: true }],
+            (keymap, Key::Char('e')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Tail { reverse: false }],
 
-            allmap! { Key::Delete }                     => vec![Event::Delete],
+            (keymap, Key::Char('^')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Bol],
+            (keymap, Key::Char('$')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Eol],
 
-            allmap! { Key::Down }                       => vec![Event::Down],
-            allmap! { Key::Left }                       => vec![Event::Left],
-            allmap! { Key::Right }                      => vec![Event::Right],
-            allmap! { Key::Up }                         => vec![Event::Up],
+            (keymap, Key::Char('a')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Insert, Operation::Right],
+            (keymap, Key::Char('i')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Insert],
 
-            insmap! { Key::Backspace }                  => vec![Event::Delete, Event::Left],
-            insmap! { Key::Delete }                     => vec![Event::Delete],
+            (keymap, Key::Char(';')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Eval],
 
-            insmap! { Key::Esc }                        => vec![Event::Escape, Event::Left],
-            ninmap! { Key::Esc }                        => vec![Event::Escape],
+            (keymap, Key::Char('s')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Surround],
+            (keymap, Key::Char('d')) if keymap.intersects(!(Keymap::INSERT | Keymap::QUERY)) => vec![Operation::Delete],
 
-            niqmap! { 'a' }                             => vec![Event::Insert, Event::Right],
-            niqmap! { 'i' }                             => vec![Event::Insert],
+            (keymap, Key::Esc) if keymap.intersects(!Keymap::INSERT)                         => vec![Operation::Escape],
 
-            niqmap! { 'h' }                             => vec![Event::Left],
-            niqmap! { 'j' }                             => vec![Event::Down],
-            niqmap! { 'k' }                             => vec![Event::Up],
-            niqmap! { 'l' }                             => vec![Event::Right],
+            (keymap, Key::Backspace) if keymap.intersects(Keymap::INSERT)                    => vec![Operation::Delete, Operation::Left],
+            (keymap, Key::Delete) if keymap.intersects(Keymap::INSERT)                       => vec![Operation::Delete],
 
-            niqmap! { 'w' }                             => vec![Event::Head { reverse: false }],
-            niqmap! { 'b' }                             => vec![Event::Head { reverse: true }],
-            niqmap! { 'e' }                             => vec![Event::Tail { reverse: false }],
-            niqmap! { 'g', 'e' }                        => vec![Event::Tail { reverse: true }],
+            (keymap, Key::Esc) if keymap.intersects(Keymap::INSERT)                          => vec![Operation::Escape, Operation::Left],
+
+            (keymap, Key::Delete) if keymap.intersects(Keymap::all())                        => vec![Operation::Delete],
+
+            (keymap, Key::Down) if keymap.intersects(Keymap::all())                          => vec![Operation::Down],
+            (keymap, Key::Left) if keymap.intersects(Keymap::all())                          => vec![Operation::Left],
+            (keymap, Key::Right) if keymap.intersects(Keymap::all())                         => vec![Operation::Right],
+            (keymap, Key::Up) if keymap.intersects(Keymap::all())                            => vec![Operation::Up],
+
+            (keymap, Key::Char(ch)) if keymap.intersects(Keymap::INSERT | Keymap::QUERY)     => vec![Operation::Input(ch)],
+
+            (_, _)                                                                           => vec![],
         };
 
-        let matches: Vec<_> = keymap
-            .keys()
-            .filter(|(map, sequence)| {
-                map.contains(self.keymap())
-                    && if key.is_none() {
-                        sequence == &self.queue
-                    } else {
-                        sequence.starts_with(self.queue.as_slice())
-                    }
-            })
-            .collect();
-
-        if matches.len() > 1 {
-            return;
-        }
-
-        if let [matched] = matches.as_slice() {
-            let (_, sequence) = matched;
-
-            if sequence == &self.queue {
-                self.queue.clear();
-                self.advance(keymap[matched].as_slice());
-            }
-
-            return;
-        }
-
-        match (self.mode(), self.queue.as_slice()) {
-            (Mode::Insert { .. }, &[Key::Char(Modifiers::NONE, ch)]) => {
-                self.advance(&[Event::Input(ch), Event::Forward]);
-            },
-
-            (Mode::Query { .. }, &[Key::Char(Modifiers::NONE, ch)]) => {
-                self.advance(&[Event::Input(ch), Event::Forward]);
-            },
-
-            _ => {},
-        };
-
-        self.queue.clear();
+        self.advance(operations.as_slice())
     }
 
     /// Advances the state state by handling events.
-    pub fn advance(&mut self, events: &[Event]) {
-        self.mode = events
-            .iter()
-            .try_fold(std::mem::take(&mut self.mode), |mode, &event| {
-                mode.advance(&mut self.state, event)
-            })
-            .unwrap_or_else(|mode| mode);
-    }
-}
+    pub fn advance(&mut self, operations: &[Operation]) {
+        let mut mode = std::mem::take(&mut self.mode);
 
-impl State {
-    /// Returns the cursor position.
-    #[must_use]
-    pub fn cursor(&self) -> Cursor {
-        self.cursor
-    }
-
-    /// Returns a reference to the buffer.
-    #[must_use]
-    pub fn buffer(&self) -> &Buffer {
-        &self.buffer
-    }
-
-    pub fn set_cursor(&mut self, cursor: Cursor) {
-        self.cursor = cursor;
-    }
-
-    pub fn insert(&mut self, at: Cursor, ch: char) {
-        self.buffer.insert(at, ch)
-    }
-
-    pub fn replace_range(&mut self, range: impl RangeBounds<usize>, text: &str) {
-        self.buffer.replace_range(range, text)
-    }
-}
-
-impl Mode {
-    #[must_use]
-    pub fn escape() -> Mode {
-        Mode::Normal
-    }
-
-    #[must_use]
-    pub fn insert() -> Mode {
-        Mode::Insert
-    }
-
-    pub fn operator(name: &'static str, and_then: impl Callback<(Cursor, Cursor)>) -> Mode {
-        Mode::Operator { name, and_then: Box::new(and_then) }
-    }
-
-    #[must_use]
-    pub fn query(
-        name: &'static str,
-        until: fn(&str, Event) -> bool,
-        and_then: impl for<'r> Callback<&'r str>,
-    ) -> Mode {
-        Mode::Query {
-            name,
-            until,
-
-            cursor: Cursor::default(),
-            buffer: Buffer::default(),
-
-            and_then: Box::new(and_then),
+        for &operation in operations {
+            match mode.advance(&mut self.state, operation) {
+                Advance::Continue(next) => mode = next,
+                Advance::Stop(next) => {
+                    mode = next;
+                    break;
+                },
+            }
         }
-    }
 
-    /// Returns an user-friendly name for the mode.
-    #[must_use]
-    pub fn name(&self) -> &str {
-        match self {
-            Mode::Normal { .. } => "Normal",
-            Mode::Insert { .. } => "Insert",
-            Mode::Select { .. } => "Select",
-
-            Mode::Query { name, .. } => name,
-            Mode::Operator { name, .. } => name,
-        }
-    }
-
-    /// Advances the state state by handling an event.
-    pub fn advance(self, state: &mut State, event: Event) -> Result<Mode, Mode> {
-        use Mode::{Normal, Operator, Query};
-
-        match (self, event) {
-            (_, Event::Escape) => Ok(Mode::escape()),
-            (_, Event::Insert) => Ok(Mode::insert()),
-
-            (Query { mut buffer, until, name, mut cursor, and_then }, event) => {
-                match event {
-                    Event::Input(ch) => {
-                        buffer.insert(cursor, ch);
-                        cursor = cursor
-                            .iter::<Codepoint>(&buffer)
-                            .next()
-                            .unwrap_or_else(|| Cursor::eof(&buffer));
-                    },
-
-                    _ => (),
-                };
-
-                if until(buffer.as_str(), event) {
-                    and_then(state, buffer.as_str())
-                } else {
-                    Ok(Query { buffer, until, name, cursor, and_then })
-                }
-            },
-
-            (mode, Event::Forward) => {
-                if let Some(cursor) = state.cursor.iter::<Codepoint>(state.buffer()).next() {
-                    state.set_cursor(cursor);
-
-                    Ok(mode)
-                } else {
-                    Err(mode)
-                }
-            },
-
-            (mode, Event::Backward) => {
-                state.set_cursor(
-                    state
-                        .cursor()
-                        .iter::<Codepoint>(state.buffer())
-                        .next_back()
-                        .unwrap_or(state.cursor()),
-                );
-
-                Ok(mode)
-            },
-
-            (mode, Event::Left) => {
-                state.set_cursor(
-                    state
-                        .cursor()
-                        .iter::<Bounded>(state.buffer())
-                        .next_back()
-                        .unwrap_or(state.cursor()),
-                );
-
-                Ok(mode)
-            },
-
-            (mode, Event::Right) => {
-                state.set_cursor(
-                    state.cursor().iter::<Bounded>(state.buffer()).next().unwrap_or(state.cursor()),
-                );
-                Ok(mode)
-            },
-
-            (mode, Event::Down) => {
-                state.set_cursor(
-                    state.cursor().iter::<Line>(state.buffer()).next().unwrap_or(state.cursor()),
-                );
-                Ok(mode)
-            },
-
-            (mode, Event::Up) => {
-                state.set_cursor(
-                    state
-                        .cursor()
-                        .iter::<Line>(state.buffer())
-                        .next_back()
-                        .unwrap_or(state.cursor()),
-                );
-                Ok(mode)
-            },
-
-            (Normal, Event::Delete) => {
-                Ok(Mode::operator("Delete", |state: &mut State, range: (Cursor, Cursor)| {
-                    state.replace_range(range.0.offset()..range.1.offset(), "");
-                    Ok(Mode::escape())
-                }))
-            },
-
-            (mode, Event::Bol) => {
-                state.set_cursor(
-                    state.cursor().iter::<Bounded>(state.buffer()).rev().last().expect("first"),
-                );
-                Ok(mode)
-            },
-
-            (mode, Event::Eol) => {
-                state.set_cursor(
-                    state.cursor().iter::<Bounded>(state.buffer()).last().expect("last"),
-                );
-                Ok(mode)
-            },
-
-            (mode, Event::Input(ch)) => {
-                state.insert(state.cursor(), ch);
-                Ok(mode)
-            },
-
-            (Normal, Event::Surround) => {
-                let surround = |_: &mut State, (start, end): (Cursor, Cursor)| {
-                    let surround = move |state: &mut State, sandwich: &str| {
-                        let mut chars = sandwich.chars();
-
-                        let prefix = chars.next().expect("prefix");
-                        let suffix = chars.next().expect("suffix");
-
-                        state.insert(end, suffix);
-                        state.insert(start, prefix);
-
-                        Ok(Mode::escape())
-                    };
-
-                    Ok(Mode::query("Surround", |buf: &str, _: Event| buf.len() == 2, surround))
-                };
-
-                Ok(Mode::operator("Surround", surround))
-            },
-
-            (mode, Event::Head { reverse: true }) => {
-                let end = state.cursor();
-                state.set_cursor(
-                    state
-                        .cursor()
-                        .iter::<Head>(state.buffer())
-                        .next_back()
-                        .unwrap_or_else(|| state.cursor()),
-                );
-
-                if let Operator { and_then, .. } = mode {
-                    and_then(state, (state.cursor(), end))
-                } else {
-                    Ok(mode)
-                }
-            },
-
-            (mode, Event::Head { reverse: false }) => {
-                let start = state.cursor();
-                state.set_cursor(
-                    state
-                        .cursor()
-                        .iter::<Head>(state.buffer())
-                        .next()
-                        .unwrap_or_else(|| Cursor::eof(state.buffer())),
-                );
-
-                if let Operator { and_then, .. } = mode {
-                    and_then(state, (start, state.cursor()))
-                } else {
-                    Ok(mode)
-                }
-            },
-
-            (mode, Event::Tail { reverse: false }) => {
-                if let Some(end) = state.cursor().iter::<Tail>(state.buffer()).next() {
-                    let start = state.cursor();
-                    state.set_cursor(end);
-
-                    if let Operator { and_then, .. } = mode {
-                        and_then(state, (start, end))
-                    } else {
-                        Ok(mode)
-                    }
-                } else {
-                    Err(mode)
-                }
-            },
-
-            (mode, Event::Tail { reverse: true }) => {
-                if let Some(start) = state.cursor().iter::<Tail>(state.buffer()).next_back() {
-                    let end = state.cursor();
-                    state.set_cursor(start);
-
-                    if let Operator { and_then, .. } = mode {
-                        and_then(state, (start, end))
-                    } else {
-                        Ok(mode)
-                    }
-                } else {
-                    Err(mode)
-                }
-            },
-
-            (mode, _) => Err(mode),
-        }
+        self.mode = mode;
     }
 }

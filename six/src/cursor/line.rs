@@ -1,15 +1,14 @@
-use crate::buffer::Buffer;
 use crate::cursor::{Bounded, Cursor, Iter};
 
 pub struct Line<'a> {
     cursor: Cursor,
     column: usize,
-    buffer: &'a Buffer,
+    text: &'a str,
 }
 
 impl<'a> Iter<'a> for Line<'a> {
-    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
-        Self { buffer, cursor, column: cursor.to_col(buffer) }
+    fn new(cursor: Cursor, text: &'a str) -> Self {
+        Self { text, cursor, column: cursor.to_col(text) }
     }
 
     fn at(&self) -> Self::Item {
@@ -21,12 +20,12 @@ impl Iterator for Line<'_> {
     type Item = Cursor;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.cursor.index += self.buffer.as_str()[self.cursor.index..].find('\n')? + 1;
+        self.cursor.offset += self.text[self.cursor.offset..].find('\n')? + 1;
 
         self.cursor = self
             .cursor
-            .iter::<Bounded>(self.buffer)
-            .take_while(|cursor| cursor.to_col(self.buffer) <= self.column)
+            .iter::<Bounded>(self.text)
+            .take_while(|cursor| cursor.to_col(self.text) <= self.column)
             .last()
             .unwrap_or(self.cursor);
 
@@ -36,13 +35,13 @@ impl Iterator for Line<'_> {
 
 impl DoubleEndedIterator for Line<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.cursor.index = self.buffer.as_str()[..self.cursor.index].rfind('\n')?;
+        self.cursor.offset = self.text[..self.cursor.offset].rfind('\n')?;
 
         self.cursor = self
             .cursor
-            .iter::<Bounded>(self.buffer)
+            .iter::<Bounded>(self.text)
             .rev()
-            .find(|cursor| cursor.to_col(self.buffer) == self.column)
+            .find(|cursor| cursor.to_col(self.text) == self.column)
             .unwrap_or(self.cursor);
 
         Some(self.cursor)

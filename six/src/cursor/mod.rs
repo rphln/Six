@@ -1,7 +1,5 @@
 use unicode_width::UnicodeWidthStr;
 
-use crate::buffer::Buffer;
-
 pub mod bounded;
 pub mod codepoint;
 pub mod head;
@@ -14,68 +12,74 @@ pub use crate::cursor::{
     tail::Tail,
 };
 
-/// A text buffer coordinate.
+/// A text text coordinate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Cursor {
-    /// The cursor index.
-    index: usize,
+    /// The cursor offset.
+    offset: usize,
 }
 
 impl Cursor {
     /// Creates a new cursor at the specified position.
     #[inline]
     #[must_use]
-    pub fn new(index: usize) -> Self {
-        Self { index }
+    pub fn new(offset: usize) -> Self {
+        Self { offset }
     }
 
-    /// Creates a new cursor at the final position of a buffer.
+    /// Creates a new cursor at the final position of a text.
     #[inline]
     #[must_use]
-    pub fn eof(buffer: &Buffer) -> Self {
-        Self { index: buffer.len() }
+    pub fn eof(text: &str) -> Self {
+        Self { offset: text.len() }
     }
 
     /// Returns the codepoint offset for this cursor.
     #[inline]
     #[must_use]
     pub fn offset(self) -> usize {
-        self.index
+        self.offset
     }
 
     /// Returns the horizontal position of this `Cursor`.
     #[must_use]
-    pub fn to_col(self, buffer: &Buffer) -> usize {
-        let buffer = buffer.as_str();
-
-        let start = buffer[..self.index].rfind('\n').map_or(0, |idx| idx + 1);
-        buffer[start..self.index].width()
+    pub fn to_col(self, text: &str) -> usize {
+        let start = text[..self.offset].rfind('\n').map_or(0, |idx| idx + 1);
+        text[start..self.offset].width()
     }
 
     /// Returns the vertical position of this `Cursor`.
     #[must_use]
-    pub fn to_row(self, buffer: &Buffer) -> usize {
-        buffer.as_str()[..self.index].split('\n').count() - 1
+    pub fn to_row(self, text: &str) -> usize {
+        text[..self.offset].split('\n').count() - 1
     }
 
     /// Returns an iterator over the positions of a given unit.
     #[inline]
     #[must_use]
-    pub fn iter<'a, It: Iter<'a>>(self, buffer: &'a Buffer) -> It {
-        It::new(self, buffer)
+    pub fn iter<'a, It: Iter<'a>>(self, text: &'a str) -> It {
+        It::new(self, text)
     }
-}
 
-impl From<Cursor> for usize {
-    fn from(cursor: Cursor) -> usize {
-        cursor.index
+    /// Returns the previous cursor position over a given unit.
+    #[inline]
+    #[must_use]
+    pub fn backward<'a, It: Iter<'a>>(self, text: &'a str) -> Option<Self> {
+        self.iter::<It>(text).next_back()
+    }
+
+    /// Returns the next cursor position over a given unit.
+    #[inline]
+    #[must_use]
+    pub fn forward<'a, It: Iter<'a>>(self, text: &'a str) -> Option<Self> {
+        self.iter::<It>(text).next()
     }
 }
 
 /// An iterator over the positions of an unit.
 pub trait Iter<'a>: Iterator<Item = Cursor> + DoubleEndedIterator {
     /// Creates a new iterator.
-    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self;
+    fn new(cursor: Cursor, text: &'a str) -> Self;
 
     /// Returns the current position of this iterator.
     fn at(&self) -> Self::Item;

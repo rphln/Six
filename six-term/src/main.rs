@@ -18,7 +18,7 @@ use tui::{Frame, Terminal};
 use termion::event;
 use termion::{input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen};
 
-use six::{state::Modifiers, Editor, Key, Mode};
+use six::{Cursor, Editor, Key, Mode};
 
 #[derive(Default)]
 pub struct TextEditState<'a> {
@@ -29,17 +29,17 @@ pub struct TextEditState<'a> {
 }
 
 impl<'a> TextEditState<'a> {
-    fn new(buffer: &'a six::Buffer, cursor: six::Cursor) -> Self {
+    fn new(buffer: &'a str, cursor: Cursor) -> Self {
         let col = cursor.to_col(buffer) as u16;
         let row = cursor.to_row(buffer) as u16;
 
-        Self { col, row, buffer: buffer.as_str() }
+        Self { col, row, buffer }
     }
 }
 
 impl<'a> From<&'a Editor> for TextEditState<'a> {
     fn from(state: &'a Editor) -> TextEditState<'a> {
-        TextEditState::new(state.state().buffer(), state.state().cursor())
+        TextEditState::new(state.buffer(), state.cursor())
     }
 }
 
@@ -92,7 +92,7 @@ fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor)
 
 fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let mode = state.mode().name();
-    let position = state.state().cursor().to_col(state.state().buffer()).to_string();
+    let position = state.cursor().to_col(state.buffer()).to_string();
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -114,8 +114,8 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     frame.render_widget(mode, chunks[0]);
     frame.render_widget(position, chunks[2]);
 
-    if let Mode::Query { buffer, cursor, .. } = state.mode() {
-        let mut stat = TextEditState::new(buffer, *cursor);
+    if let Mode::Query { buffer, .. } = state.mode() {
+        let mut stat = TextEditState::new(buffer.buffer(), buffer.cursor());
         let view = TextEditView::default();
 
         view.focus(chunks[1], frame, &stat);
@@ -135,20 +135,20 @@ where
     }
 
     terminal.draw(|frame| {
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Ratio(3, 4), Constraint::Ratio(1, 4)])
+        let parent = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .split(frame.size());
 
-        let vertical = Layout::default()
+        let editor = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![Constraint::Min(1), Constraint::Length(1)])
-            .split(horizontal[0]);
+            .split(parent[0]);
 
-        draw_edit_view(frame, vertical[0], state);
-        draw_status_line(frame, vertical[1], state);
+        draw_edit_view(frame, editor[0], state);
+        draw_status_line(frame, editor[1], state);
 
-        draw_debug_view(frame, horizontal[1], state);
+        draw_debug_view(frame, parent[1], state);
     })?;
 
     Ok(())
@@ -172,13 +172,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             match event? {
                 event::Key::Ctrl('d') => break,
 
-                event::Key::Char(ch) => editor.handle_key(Some(Key::Char(Modifiers::NONE, ch))),
-                event::Key::Esc => editor.handle_key(Some(Key::Esc)),
+                event::Key::Char(ch) => editor.handle_key(Key::Char(ch)),
+                event::Key::Esc => editor.handle_key(Key::Esc),
 
-                event::Key::Left => editor.handle_key(Some(Key::Left)),
-                event::Key::Right => editor.handle_key(Some(Key::Right)),
-                event::Key::Up => editor.handle_key(Some(Key::Up)),
-                event::Key::Down => editor.handle_key(Some(Key::Down)),
+                event::Key::Left => editor.handle_key(Key::Left),
+                event::Key::Right => editor.handle_key(Key::Right),
+                event::Key::Up => editor.handle_key(Key::Up),
+                event::Key::Down => editor.handle_key(Key::Down),
 
                 _ => continue,
             }

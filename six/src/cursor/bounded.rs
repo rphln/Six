@@ -1,21 +1,20 @@
-use crate::buffer::Buffer;
 use crate::cursor::{Codepoint, Cursor, Iter};
 
 /// An iterator over the cursor positions within a line.
 pub struct Bounded<'a> {
     codepoints: Codepoint<'a>,
-    buffer: &'a Buffer,
+    text: &'a str,
 }
 
 impl Bounded<'_> {
     fn is_eol(&self, cursor: Cursor) -> bool {
-        self.buffer.get(cursor.index).map_or(true, |ch| ch == '\n')
+        self.text[cursor.offset..].chars().next().map_or(true, |ch| ch == '\n')
     }
 }
 
 impl<'a> Iter<'a> for Bounded<'a> {
-    fn new(cursor: Cursor, buffer: &'a Buffer) -> Self {
-        Self { buffer, codepoints: Codepoint::new(cursor, buffer) }
+    fn new(cursor: Cursor, text: &'a str) -> Self {
+        Self { text, codepoints: Codepoint::new(cursor, text) }
     }
 
     fn at(&self) -> Self::Item {
