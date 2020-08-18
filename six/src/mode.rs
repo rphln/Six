@@ -1,7 +1,7 @@
-use rlua::{Lua, UserData};
+use rlua::Lua;
 
+use crate::buffer::Buffer;
 use crate::cursor::{Bounded, Codepoint, Cursor, Head, Line, Tail};
-use crate::state::Buffer;
 
 /// An state mode.
 #[derive(Derivative)]
@@ -50,14 +50,23 @@ pub enum Mode {
 /// Specifies whether to continue or halt the current macro operation.
 pub enum Advance {
     Continue(Mode),
-    Halt(Mode),
+    Break(Mode),
 }
 
-#[derive(new)]
 pub struct Context<'a> {
-    buffer: &'a mut Buffer,
-    lua: &'a Lua,
-    messages: &'a mut Vec<String>,
+    pub buffer: &'a mut Buffer,
+    pub messages: &'a mut Vec<String>,
+    pub interpreter: &'a Lua,
+}
+
+impl<'a> Context<'a> {
+    pub fn new(
+        buffer: &'a mut Buffer,
+        messages: &'a mut Vec<String>,
+        interpreter: &'a Lua,
+    ) -> Self {
+        Self { buffer, messages, interpreter }
+    }
 }
 
 // TODO: Replace with a trait alias once it stabilizes.
@@ -120,30 +129,21 @@ pub enum Operation {
     /// Surrounds a region.
     Surround,
 
-    /// Queries the user for an Lua expression and evaluates it.
+    /// Queries the user for an expression and evaluates it.
     Eval,
 
-    /// Evaluates a Lua expression.
-    Command(&'static str),
+    /// Calls a function.
+    Call(&'static str),
 
     /// Inserts a character at the cursor position and advances it.
     Input(char),
 }
 
-bitflags! {
-    pub struct Keymap: u8 {
-        const NORMAL   = 1 << 0;
-        const QUERY    = 1 << 1;
-        const INSERT   = 1 << 2;
-        const SELECT   = 1 << 3;
-        const OPERATOR = 1 << 4;
-    }
-}
 impl Mode {
     /// Halts the current macro-operation and returns to the `Normal` mode.
     #[must_use]
     pub fn abort() -> Advance {
-        Advance::Halt(Mode::Normal)
+        Advance::Break(Mode::Normal)
     }
 
     /// Enters the `Normal` mode.
@@ -194,21 +194,10 @@ impl Mode {
         }
     }
 
-    /// Returns the active key map.
-    #[must_use]
-    pub fn keymap(&self) -> Keymap {
-        match self {
-            Mode::Normal { .. } => Keymap::NORMAL,
-            Mode::Insert { .. } => Keymap::INSERT,
-            Mode::Select { .. } => Keymap::SELECT,
-            Mode::Operator { .. } => Keymap::OPERATOR,
-            Mode::Query { .. } => Keymap::QUERY,
-        }
-    }
-
     /// Advances the state state by handling an event.
+    #[must_use]
     pub fn advance(self, context: Context, event: Operation) -> Advance {
-        use Advance::{Continue, Halt};
+        use Advance::{Break, Continue};
         use Mode::{Normal, Operator, Query};
 
         match (self, event) {
@@ -223,7 +212,7 @@ impl Mode {
                 } else {
                     Continue(Query { buffer, name, length, and_then })
                 }
-            }
+            },
 
             (Query { mut buffer, name, length, and_then }, Operation::Delete) => {
                 let end = buffer
@@ -233,20 +222,20 @@ impl Mode {
                 buffer.edit("", buffer.cursor()..end);
 
                 Continue(Query { name, buffer, length, and_then })
-            }
+            },
 
             (Query { mut buffer, name, length, and_then }, Operation::Left) => {
                 if buffer.backward::<Codepoint>().is_some() {
                     Continue(Query { buffer, name, length, and_then })
                 } else {
-                    Halt(Query { buffer, name, length, and_then })
+                    Break(Query { buffer, name, length, and_then })
                 }
-            }
+            },
 
             (mode, Operation::Input(ch)) => {
                 context.buffer.append(ch);
                 Continue(mode)
-            }
+            },
 
             (mode, Operation::Backward) => {
                 if let Some(end) = context.buffer.backward::<Codepoint>() {
@@ -259,7 +248,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Left) => {
                 if let Some(end) = context.buffer.backward::<Bounded>() {
@@ -272,7 +261,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Up) => {
                 if let Some(end) = context.buffer.backward::<Line>() {
@@ -285,7 +274,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Head { reverse: true }) => {
                 if let Some(end) = context.buffer.backward::<Head>() {
@@ -298,7 +287,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Tail { reverse: true }) => {
                 if let Some(end) = context.buffer.backward::<Tail>() {
@@ -311,7 +300,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Forward) => {
                 if let Some(start) = context.buffer.forward::<Codepoint>() {
@@ -324,7 +313,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Right) => {
                 if let Some(start) = context.buffer.forward::<Bounded>() {
@@ -337,7 +326,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Down) => {
                 if let Some(start) = context.buffer.forward::<Line>() {
@@ -350,7 +339,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Head { reverse: false }) => {
                 if let Some(start) = context.buffer.forward::<Head>() {
@@ -363,7 +352,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Tail { reverse: false }) => {
                 if let Some(start) = context.buffer.forward::<Tail>() {
@@ -376,7 +365,7 @@ impl Mode {
                 } else {
                     Mode::abort()
                 }
-            }
+            },
 
             (mode, Operation::Delete) => {
                 let delete = move |context: Context, (start, end): (Cursor, Cursor)| {
@@ -387,40 +376,21 @@ impl Mode {
                 };
 
                 Mode::to_operator("Delete", delete)
-            }
+            },
 
             (mode, Operation::Eval) => {
-                let eval = |context: Context, program: &str| {
-                    let buffer = context.buffer;
-                    let messages = context.messages;
-
-                    context
-                        .lua
-                        .context(|ctx| {
-                            ctx.scope(|scope| {
-                                let globals = ctx.globals();
-
-                                let class = ctx.create_table()?;
-
-                                globals.set("buffer", scope.create_nonstatic_userdata(buffer)?)?;
-                                messages.push(ctx.load(program).eval()?);
-
-                                Ok(Continue(mode))
-                            })
-                        })
-                        .unwrap_or_else(|_: Box<dyn std::error::Error>| Mode::abort())
-                };
+                let eval = move |_context: Context, _program: &str| Continue(mode);
 
                 Mode::to_query("Eval", None, eval)
-            }
+            },
 
             (Normal, Operation::Surround) => {
                 let surround = |_: Context, (start, end): (Cursor, Cursor)| {
                     let surround = move |context: Context, sandwich: &str| {
-                        let mut chars = sandwich.chars();
+                        let mut sandwich = sandwich.chars();
 
-                        let prefix = chars.next().expect("prefix");
-                        let suffix = chars.next().expect("suffix");
+                        let prefix = sandwich.next().expect("prefix");
+                        let suffix = sandwich.next().expect("suffix");
 
                         context.buffer.insert(suffix, end);
                         context.buffer.insert(prefix, start);
@@ -428,13 +398,13 @@ impl Mode {
                         Mode::escape()
                     };
 
-                    Mode::to_query("Surround", Some(2), surround)
+                    Mode::to_query("Surround", Some(1), surround)
                 };
 
                 Mode::to_operator("Surround", surround)
-            }
+            },
 
-            (mode, ..) => Halt(mode),
+            (mode, ..) => Break(mode),
         }
     }
 }

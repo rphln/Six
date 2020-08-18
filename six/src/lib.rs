@@ -8,17 +8,14 @@ extern crate derivative;
 #[macro_use]
 extern crate bitflags;
 
-#[macro_use]
-extern crate derive_new;
-
+pub mod buffer;
 pub mod cursor;
 pub mod event;
 pub mod mode;
 pub mod state;
 
+pub use buffer::Buffer;
 pub use cursor::Cursor;
-pub use event::{Event, Key};
+pub use event::{Event, Key, Modifiers};
 pub use mode::Mode;
-pub use state::{Buffer, Editor};
-
-pub use rlua::Lua;
+pub use state::Editor;

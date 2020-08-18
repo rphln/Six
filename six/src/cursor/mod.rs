@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use unicode_width::UnicodeWidthStr;
 
 pub mod bounded;
@@ -83,4 +85,22 @@ pub trait Iter<'a>: Iterator<Item = Cursor> + DoubleEndedIterator {
 
     /// Returns the current position of this iterator.
     fn at(&self) -> Self::Item;
+}
+
+/// Converts a `Cursor` bound to an offset bound.
+#[must_use]
+pub fn to_offset_bound(bound: Bound<&Cursor>, buffer: &str) -> Bound<usize> {
+    use Bound::{Excluded, Included, Unbounded};
+
+    match bound {
+        Unbounded => Unbounded,
+        Excluded(cursor) => Excluded(cursor.offset()),
+        Included(cursor) => {
+            if cursor.offset() == buffer.len() {
+                Included(cursor.offset())
+            } else {
+                Included(cursor.forward::<Codepoint>(buffer).expect("next").offset() - 1)
+            }
+        },
+    }
 }

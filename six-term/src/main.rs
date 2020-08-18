@@ -8,11 +8,9 @@ use std::marker::PhantomData;
 
 use tui::backend::{Backend, TermionBackend};
 use tui::buffer::Buffer;
-use tui::layout::{Alignment, Rect};
+use tui::layout::Rect;
 use tui::layout::{Constraint, Direction, Layout};
-use tui::style::{Color, Style};
-use tui::text::Span;
-use tui::widgets::{Paragraph, StatefulWidget, Widget, Wrap};
+use tui::widgets::{Paragraph, StatefulWidget, Widget};
 use tui::{Frame, Terminal};
 
 use termion::event;
@@ -54,7 +52,7 @@ impl TextEditView<'_> {
         let x = state.col.saturating_sub(area.width - 1);
         let y = state.row.saturating_sub(area.height - 1);
 
-        (x, y)
+        (y, x)
     }
 
     pub fn focus<B: Backend>(&self, area: Rect, frame: &mut Frame<B>, state: &TextEditState) {
@@ -81,15 +79,6 @@ fn draw_edit_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) 
     frame.render_stateful_widget(view, area, &mut stat);
 }
 
-fn draw_debug_view<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
-    let debug = format!("{:#?}", state);
-    let debug = Paragraph::new(debug.as_ref())
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Black));
-
-    frame.render_widget(debug, area);
-}
-
 fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor) {
     let mode = state.mode().name();
     let position = state.cursor().to_col(state.content()).to_string();
@@ -103,13 +92,8 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
         ])
         .split(area);
 
-    let emphasis = Style::default().fg(Color::Green);
-
-    let mode = Span::styled(mode, emphasis);
     let mode = Paragraph::new(mode);
-
-    let position = Span::styled(position, emphasis);
-    let position = Paragraph::new(position).alignment(Alignment::Right);
+    let position = Paragraph::new(position.as_ref());
 
     frame.render_widget(mode, chunks[0]);
     frame.render_widget(position, chunks[2]);
@@ -123,32 +107,15 @@ fn draw_status_line<B: Backend>(frame: &mut Frame<B>, area: Rect, state: &Editor
     }
 }
 
-fn draw<B>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Error>>
-where
-    B: Backend + io::Write,
-{
-    match state.mode() {
-        Mode::Insert { .. } => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBar)?,
-        // Mode::Query { .. } => write!(terminal.backend_mut(), "{}",
-        // termion::cursor::BlinkingBar)?,
-        _ => write!(terminal.backend_mut(), "{}", termion::cursor::SteadyBlock)?,
-    }
-
+fn draw<B: Backend>(terminal: &mut Terminal<B>, state: &Editor) -> Result<(), Box<dyn Error>> {
     terminal.draw(|frame| {
-        let parent = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
-            .split(frame.size());
-
-        let editor = Layout::default()
+        let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![Constraint::Min(1), Constraint::Length(1)])
-            .split(parent[0]);
+            .split(frame.size());
 
-        draw_edit_view(frame, editor[0], state);
-        draw_status_line(frame, editor[1], state);
-
-        draw_debug_view(frame, parent[1], state);
+        draw_edit_view(frame, parts[0], state);
+        draw_status_line(frame, parts[1], state);
     })?;
 
     Ok(())
@@ -165,27 +132,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
     let mut editor = Editor::default();
 
-    loop {
-        draw(&mut terminal, &editor)?;
+    draw(&mut terminal, &editor)?;
 
-        if let Some(event) = io::stdin().keys().next() {
-            match event? {
-                event::Key::Ctrl('d') => break,
+    for event in io::stdin().keys() {
+        match event? {
+            event::Key::Ctrl('d') => break,
 
-                event::Key::Char(ch) => editor.handle_key(Key::Char(ch)),
-                event::Key::Esc => editor.handle_key(Key::Esc),
+            event::Key::Char(ch) => editor.handle_key(Key::Char(ch)),
+            event::Key::Esc => editor.handle_key(Key::Esc),
 
-                event::Key::Delete => editor.handle_key(Key::Delete),
-                event::Key::Backspace => editor.handle_key(Key::Backspace),
+            event::Key::Delete => editor.handle_key(Key::Delete),
+            event::Key::Backspace => editor.handle_key(Key::Backspace),
 
-                event::Key::Left => editor.handle_key(Key::Left),
-                event::Key::Right => editor.handle_key(Key::Right),
-                event::Key::Up => editor.handle_key(Key::Up),
-                event::Key::Down => editor.handle_key(Key::Down),
+            event::Key::Left => editor.handle_key(Key::Left),
+            event::Key::Right => editor.handle_key(Key::Right),
+            event::Key::Up => editor.handle_key(Key::Up),
+            event::Key::Down => editor.handle_key(Key::Down),
 
-                _ => continue,
-            }
+            _ => continue,
         }
+
+        draw(&mut terminal, &editor)?;
     }
 
     Ok(())

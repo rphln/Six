@@ -7,11 +7,7 @@ license = "LGPL-3.0-or-later"
 exclude = ["assets/**"]
 
 [dependencies]
-rlua = "0.17.0"
-
 bitflags = "1.0"
-
 derivative = "2.1.1"
-derive-new = "0.5.8"
-
+rlua = "0.17.0"
 unicode-width = "0.1.5"
