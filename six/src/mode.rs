@@ -1,7 +1,6 @@
-use rlua::Lua;
-
 use crate::buffer::Buffer;
 use crate::cursor::{Bounded, Codepoint, Cursor, Head, Line, Tail};
+use crate::state::Context;
 
 /// An state mode.
 #[derive(Derivative)]
@@ -47,36 +46,14 @@ pub enum Mode {
     },
 }
 
-/// Specifies whether to continue or halt the current macro operation.
-pub enum Advance {
-    Continue(Mode),
-    Break(Mode),
-}
-
-pub struct Context<'a> {
-    pub buffer: &'a mut Buffer,
-    pub messages: &'a mut Vec<String>,
-    pub interpreter: &'a Lua,
-}
-
-impl<'a> Context<'a> {
-    pub fn new(
-        buffer: &'a mut Buffer,
-        messages: &'a mut Vec<String>,
-        interpreter: &'a Lua,
-    ) -> Self {
-        Self { buffer, messages, interpreter }
-    }
-}
-
 // TODO: Replace with a trait alias once it stabilizes.
 pub trait Callback<'a, Arg: 'a>:
-    FnOnce(Context<'a>, Arg) -> Advance + Send + Sync + 'static
+    FnOnce(Context<'a>, Arg) -> Result<Mode, Mode> + Send + Sync + 'static
 {
 }
 
 impl<'a, Arg: 'a, F> Callback<'a, Arg> for F where
-    F: FnOnce(Context<'a>, Arg) -> Advance + Send + Sync + 'static
+    F: FnOnce(Context<'a>, Arg) -> Result<Mode, Mode> + Send + Sync + 'static
 {
 }
 
@@ -142,28 +119,28 @@ pub enum Operation {
 impl Mode {
     /// Halts the current macro-operation and returns to the `Normal` mode.
     #[must_use]
-    pub fn abort() -> Advance {
-        Advance::Break(Mode::Normal)
+    pub fn abort() -> Result<Mode, Mode> {
+        Err(Mode::Normal)
     }
 
     /// Enters the `Normal` mode.
     #[must_use]
-    pub fn escape() -> Advance {
-        Advance::Continue(Mode::Normal)
+    pub fn escape() -> Result<Mode, Mode> {
+        Ok(Mode::Normal)
     }
 
     /// Enters the `Insert` mode.
     #[must_use]
-    pub fn to_insert() -> Advance {
-        Advance::Continue(Mode::Insert)
+    pub fn to_insert() -> Result<Mode, Mode> {
+        Ok(Mode::Insert)
     }
 
     /// Enters the `Operator` mode.
     pub fn to_operator(
         name: &'static str,
         and_then: impl for<'r> Callback<'r, (Cursor, Cursor)>,
-    ) -> Advance {
-        Advance::Continue(Mode::Operator { name, and_then: Box::new(and_then) })
+    ) -> Result<Mode, Mode> {
+        Ok(Mode::Operator { name, and_then: Box::new(and_then) })
     }
 
     /// Enters the `Query` mode.
@@ -172,13 +149,8 @@ impl Mode {
         name: &'static str,
         length: Option<usize>,
         and_then: impl for<'r> Callback<'r, &'r str>,
-    ) -> Advance {
-        Advance::Continue(Mode::Query {
-            name,
-            length,
-            buffer: Buffer::default(),
-            and_then: Box::new(and_then),
-        })
+    ) -> Result<Mode, Mode> {
+        Ok(Mode::Query { name, length, buffer: Buffer::default(), and_then: Box::new(and_then) })
     }
 
     /// Returns an user-friendly name for the mode.
@@ -194,13 +166,12 @@ impl Mode {
         }
     }
 
-    /// Advances the state state by handling an event.
+    /// Result<Mode, Mode>s the state state by handling an event.
     #[must_use]
-    pub fn advance(self, context: Context, event: Operation) -> Advance {
-        use Advance::{Break, Continue};
+    pub fn advance(self, context: Context, operation: Operation) -> Result<Mode, Mode> {
         use Mode::{Normal, Operator, Query};
 
-        match (self, event) {
+        match (self, operation) {
             (_, Operation::Escape) => Mode::escape(),
             (_, Operation::Insert) => Mode::to_insert(),
 
@@ -210,7 +181,7 @@ impl Mode {
                 if ch == '\n' || length.map_or(false, |len| buffer.as_str().len() == len) {
                     and_then(context, buffer.as_str())
                 } else {
-                    Continue(Query { buffer, name, length, and_then })
+                    Ok(Query { buffer, name, length, and_then })
                 }
             },
 
@@ -221,20 +192,20 @@ impl Mode {
                     .unwrap_or_else(|| Cursor::eof(buffer.as_str()));
                 buffer.edit("", buffer.cursor()..end);
 
-                Continue(Query { name, buffer, length, and_then })
+                Ok(Query { name, buffer, length, and_then })
             },
 
             (Query { mut buffer, name, length, and_then }, Operation::Left) => {
                 if buffer.backward::<Codepoint>().is_some() {
-                    Continue(Query { buffer, name, length, and_then })
+                    Ok(Query { buffer, name, length, and_then })
                 } else {
-                    Break(Query { buffer, name, length, and_then })
+                    Err(Query { buffer, name, length, and_then })
                 }
             },
 
             (mode, Operation::Input(ch)) => {
                 context.buffer.append(ch);
-                Continue(mode)
+                Ok(mode)
             },
 
             (mode, Operation::Backward) => {
@@ -243,7 +214,7 @@ impl Mode {
                         let start = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -256,7 +227,7 @@ impl Mode {
                         let start = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -269,7 +240,7 @@ impl Mode {
                         let start = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -282,7 +253,7 @@ impl Mode {
                         let start = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -295,7 +266,7 @@ impl Mode {
                         let start = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -308,7 +279,7 @@ impl Mode {
                         let end = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -321,7 +292,7 @@ impl Mode {
                         let end = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -334,7 +305,7 @@ impl Mode {
                         let end = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -347,7 +318,7 @@ impl Mode {
                         let end = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -360,7 +331,7 @@ impl Mode {
                         let end = context.buffer.cursor();
                         and_then(context, (start, end))
                     } else {
-                        Continue(mode)
+                        Ok(mode)
                     }
                 } else {
                     Mode::abort()
@@ -372,14 +343,14 @@ impl Mode {
                     context.buffer.edit("", start..end);
                     context.buffer.set_cursor(start);
 
-                    Continue(mode)
+                    Ok(mode)
                 };
 
                 Mode::to_operator("Delete", delete)
             },
 
             (mode, Operation::Eval) => {
-                let eval = move |_context: Context, _program: &str| Continue(mode);
+                let eval = move |_context: Context, _program: &str| Ok(mode);
 
                 Mode::to_query("Eval", None, eval)
             },
@@ -404,7 +375,7 @@ impl Mode {
                 Mode::to_operator("Surround", surround)
             },
 
-            (mode, ..) => Break(mode),
+            (mode, ..) => Err(mode),
         }
     }
 }

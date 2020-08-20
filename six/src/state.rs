@@ -5,7 +5,7 @@ use rlua::Lua;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::event::Key;
-use crate::mode::{Advance, Context, Mode, Operation};
+use crate::mode::{Mode, Operation};
 
 #[derive(Hash, PartialEq, Eq, Debug)]
 pub enum Keymap {
@@ -21,7 +21,8 @@ pub enum Keymap {
 #[derivative(Debug, Default)]
 pub struct Editor {
     /// The active mode.
-    mode: Mode,
+    #[derivative(Default(value = "Some(Mode::default())"))]
+    mode: Option<Mode>,
 
     /// The text buffer.
     buffer: Buffer,
@@ -39,11 +40,21 @@ pub struct Editor {
     interpreter: Lua,
 }
 
+/// Editor context exposed to the mode.
+///
+/// This is passed instead of a reference to the `Editor` struct in order to avoid exposure
+/// to inconsistent states in the "outside world".
+pub struct Context<'a> {
+    pub buffer: &'a mut Buffer,
+    pub messages: &'a mut Vec<String>,
+    pub interpreter: &'a Lua,
+}
+
 impl Editor {
     /// Returns a reference to the buffer mode.
     #[must_use]
     pub fn mode(&self) -> &Mode {
-        &self.mode
+        self.mode.as_ref().expect("mode")
     }
 
     /// Returns the cursor position.
@@ -90,21 +101,21 @@ impl Editor {
 
     /// Advances the buffer buffer by handling events.
     pub fn advance(&mut self, operations: &[Operation]) {
-        let mut mode = std::mem::take(&mut self.mode);
+        let mode = self.mode.take().expect("mode");
 
-        for &operation in operations {
-            let context = Context::new(&mut self.buffer, &mut self.messages, &self.interpreter);
+        self.mode = operations
+            .iter()
+            .try_fold(mode, |mode, &operation| {
+                let context = Context {
+                    buffer: &mut self.buffer,
+                    messages: &mut self.messages,
+                    interpreter: &self.interpreter,
+                };
 
-            match mode.advance(context, operation) {
-                Advance::Continue(next) => mode = next,
-                Advance::Break(next) => {
-                    mode = next;
-                    break;
-                },
-            }
-        }
-
-        self.mode = mode;
+                mode.advance(context, operation)
+            })
+            .unwrap_or_else(|mode| mode)
+            .into();
     }
 }
 
