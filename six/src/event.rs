@@ -34,6 +34,9 @@ pub enum Key {
     /// Down arrow.
     Down,
 
+    /// End key.
+    End,
+
     /// Home key.
     Home,
 

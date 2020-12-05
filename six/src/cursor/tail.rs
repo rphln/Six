@@ -11,7 +11,9 @@ fn is_word_tail(cursor: Cursor, text: &str) -> bool {
     let p = chars.next();
     let q = chars.next();
 
-    !p.map_or(true, char::is_whitespace) && q.map_or(true, char::is_whitespace)
+    let res = !p.map_or(true, char::is_whitespace) && q.map_or(true, char::is_whitespace);
+
+    res
 }
 
 impl<'a> Iter<'a> for Tail<'a> {
@@ -29,6 +31,7 @@ impl Iterator for Tail<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let text = self.text;
+        eprintln!("hi");
         self.iter.find(|&p| is_word_tail(p, text))
     }
 }
@@ -49,7 +52,7 @@ mod tests {
 
     #[test]
     fn test_iter() {
-        let codepoints = Cursor::new(0).iter::<Tail>(LOREM).collect::<Vec<_>>();
+        let codepoints = Cursor::origin().iter::<Tail>(LOREM).collect::<Vec<_>>();
 
         assert_eq!(codepoints, vec![]);
     }

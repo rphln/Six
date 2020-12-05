@@ -14,7 +14,7 @@ pub mod event;
 pub mod mode;
 pub mod state;
 
-pub use buffer::Buffer;
+pub use buffer::{Buffer, Content};
 pub use cursor::Cursor;
 pub use event::{Event, Key, Modifiers};
 pub use mode::Mode;

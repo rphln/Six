@@ -1,44 +1,31 @@
-use crate::cursor::{Codepoint, Cursor, Iter};
+use crate::{Buffer, Cursor};
 
 /// An iterator over the cursor positions within a line.
 pub struct Bounded<'a> {
-    codepoints: Codepoint<'a>,
-    text: &'a str,
-}
-
-impl Bounded<'_> {
-    fn is_eol(&self, cursor: Cursor) -> bool {
-        self.text[cursor.offset..].chars().next().map_or(true, |ch| ch == '\n')
-    }
-}
-
-impl<'a> Iter<'a> for Bounded<'a> {
-    fn new(cursor: Cursor, text: &'a str) -> Self {
-        Self { text, codepoints: Codepoint::new(cursor, text) }
-    }
-
-    fn at(&self) -> Self::Item {
-        self.codepoints.at()
-    }
+    anchor: Cursor,
+    buffer: &'a Buffer,
 }
 
 impl Iterator for Bounded<'_> {
     type Item = Cursor;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.is_eol(self.at()) {
-            None
+        if self.buffer.line(self.anchor.row)?.len() < self.anchor.col {
+            self.anchor.col += 1;
+            Some(self.anchor)
         } else {
-            self.codepoints.next()
+            None
         }
     }
 }
 
 impl DoubleEndedIterator for Bounded<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        match self.codepoints.next_back()? {
-            cursor if self.is_eol(cursor) => None,
-            cursor => Some(cursor),
+        if self.anchor.col >= 1 {
+            self.anchor.col -= 1;
+            Some(self.anchor)
+        } else {
+            None
         }
     }
 }
